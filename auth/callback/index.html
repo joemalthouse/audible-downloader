@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en-GB">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Finishing Audible Sign In</title>
+    <style>
+      :root {
+        color-scheme: light;
+        font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        background: #f6f7f9;
+        color: #17202a;
+      }
+
+      body {
+        min-height: 100vh;
+        margin: 0;
+        display: grid;
+        place-items: center;
+      }
+
+      main {
+        width: min(520px, calc(100vw - 32px));
+        background: #fff;
+        border: 1px solid #d8dee8;
+        border-radius: 8px;
+        padding: 24px;
+        box-shadow: 0 16px 40px rgb(17 24 39 / 10%);
+      }
+
+      h1 {
+        margin: 0 0 8px;
+        font-size: 1.2rem;
+      }
+
+      p {
+        margin: 0;
+        color: #526070;
+        line-height: 1.5;
+      }
+
+      pre {
+        margin-top: 16px;
+        white-space: pre-wrap;
+        font-size: 0.82rem;
+        color: #8a1f11;
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <h1>Finishing Audible sign in</h1>
+      <p id="status">Completing authentication...</p>
+      <pre id="error"></pre>
+    </main>
+
+    <script type="module">
+      const statusEl = document.querySelector("#status");
+      const errorEl = document.querySelector("#error");
+
+      finish().catch((error) => {
+        statusEl.textContent = "Sign in could not be completed automatically.";
+        errorEl.textContent = error?.message || String(error);
+      });
+
+      async function finish() {
+        const stored = sessionStorage.getItem("audible-downloader-login") || localStorage.getItem("audible-downloader-login");
+        if (!stored) throw new Error("No pending Audible login session was found. Return to the app and start sign in again.");
+
+        const login = JSON.parse(stored);
+        const response = await fetch("/auth/login/finish", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ id: login.id, responseUrl: location.href, session: login.session }),
+        });
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || payload.status !== "authenticated" || !payload.identity) {
+          throw new Error(payload.error || `Login finish HTTP ${response.status}`);
+        }
+
+        localStorage.setItem("audible-downloader-identity", JSON.stringify(payload.identity));
+        sessionStorage.removeItem("audible-downloader-login");
+        localStorage.removeItem("audible-downloader-login");
+        statusEl.textContent = "Signed in. Returning to your library...";
+        location.replace("/?auth=success");
+      }
+    </script>
+  </body>
+</html>

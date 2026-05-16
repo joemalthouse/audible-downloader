@@ -1,0 +1,17 @@
+{
+  "name": "audible-downloader",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-cloudflare-dist.mjs",
+    "check": "node --check app.js && node --check helper-server.mjs && node --check scripts/build-cloudflare-dist.mjs && find functions -name '*.js' -print -exec node --check {} \\;",
+    "deploy": "npm run build && npx wrangler pages deploy dist --project-name=audible-downloader"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  },
+  "dependencies": {
+    "@noble/ciphers": "^2.2.0"
+  }
+}

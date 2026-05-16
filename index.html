@@ -1,0 +1,246 @@
+<!doctype html>
+<html lang="en-GB">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Audible Downloader — browser audiobook conversion</title>
+    <meta name="description" content="Convert your own Audible library to plain M4B files in your browser. Audio is handled on your device; Cloudflare only relays requests the browser cannot make directly." />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght,SOFT,WONK@9..144,300..900,0..100,0..1&family=DM+Mono:wght@400;500&family=Public+Sans:wght@300;400;500;600;700&display=swap" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="grain" aria-hidden="true"></div>
+
+    <header class="topbar">
+      <div class="brand">
+        <a href="#" class="brand-mark" aria-label="Audible Downloader home">
+          <span class="brand-glyph" aria-hidden="true">&#10087;</span>
+          <span class="brand-wordmark">Audible Downloader</span>
+        </a>
+        <span class="brand-dot" aria-hidden="true">·</span>
+        <span class="brand-sub">Browser conversion &middot; open source</span>
+      </div>
+      <div class="topbar-aux">
+        <div class="embed-buttons">
+          <a class="support-button github-support" href="https://github.com/joemalthouse/audible-downloader" target="_blank" rel="noopener noreferrer" aria-label="View source on GitHub">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.55 0-.27-.01-.99-.02-1.94-3.2.69-3.87-1.54-3.87-1.54-.52-1.33-1.27-1.69-1.27-1.69-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.75 2.69 1.24 3.34.95.1-.74.4-1.24.73-1.53-2.55-.29-5.24-1.28-5.24-5.7 0-1.26.45-2.29 1.18-3.1-.12-.29-.51-1.47.11-3.06 0 0 .96-.31 3.15 1.18a10.94 10.94 0 0 1 5.74 0c2.19-1.49 3.15-1.18 3.15-1.18.62 1.59.23 2.77.11 3.06.73.81 1.18 1.84 1.18 3.1 0 4.43-2.7 5.41-5.26 5.69.41.36.78 1.06.78 2.14 0 1.55-.01 2.79-.01 3.17 0 .3.21.67.8.55C20.21 21.38 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg>
+            <span>GitHub</span>
+          </a>
+          <a class="support-button coffee-support" href="https://buymeacoffee.com/joemalthouse" target="_blank" rel="noopener noreferrer">
+            <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M5 7h13a2 2 0 0 1 2 2v1a3 3 0 0 1-3 3h-.5l-.5 4.5a2 2 0 0 1-2 1.75H8a2 2 0 0 1-2-1.75L5 7zm12 4h.5a1 1 0 0 0 1-1V9H17v2zM8 4c.667.667.667 1.333 0 2-.667.667-.667 1.333 0 2M11 4c.667.667.667 1.333 0 2-.667.667-.667 1.333 0 2M14 4c.667.667.667 1.333 0 2-.667.667-.667 1.333 0 2"/></svg>
+            <span>Buy me a coffee</span>
+          </a>
+        </div>
+      </div>
+    </header>
+
+    <main class="shell app-shell">
+
+      <section class="hero">
+        <h1 class="hero-title">
+          Your Audible library,<br />
+          <span class="hero-title-emph">converted on your device.</span>
+        </h1>
+        <p class="hero-sub">
+          Sign in, load your library, and save the titles you own as plain M4B files.
+          The browser does the conversion; Cloudflare only handles the small auth/API calls
+          and the CDN byte relay needed for CORS.
+        </p>
+        <ul class="hero-points">
+          <li><span class="hero-point-num">01</span><span class="hero-point-label">Trimmed converter</span><span class="hero-point-detail">A 765 KiB ffmpeg.wasm build handles the AAX/AAXC stream copy in your browser.</span></li>
+          <li><span class="hero-point-num">02</span><span class="hero-point-label">Browser-held identity</span><span class="hero-point-detail">Your Audible device keys stay in local browser storage and are only used to sign your own requests.</span></li>
+          <li><span class="hero-point-num">03</span><span class="hero-point-label">M4B output</span><span class="hero-point-detail">The saved file keeps audiobook chapters and works with standard audiobook players.</span></li>
+        </ul>
+        <details class="info-disclosure">
+          <summary>
+            <span>How it works</span>
+            <span class="info-marker" aria-hidden="true"></span>
+          </summary>
+          <div class="info-grid">
+            <div class="info-card">
+              <span class="info-eyebrow">In your browser</span>
+              <ul>
+                <li>Renders this page, stores your Audible identity in <code>localStorage</code>, and signs requests with the ADP token Amazon issued to your device registration.</li>
+                <li>Runs a custom <code>ffmpeg.wasm</code> core (no decoders or encoders &mdash; just the <code>mov</code> demuxer with Audible's <code>audible_key</code> / <code>audible_iv</code> path and the <code>mp4</code>/<code>ipod</code> muxers).</li>
+                <li>Streams the encrypted source from Audible's CloudFront, decrypts it in WebAssembly, and writes the M4B to your file system with <code>showSaveFilePicker</code>.</li>
+              </ul>
+            </div>
+            <div class="info-card">
+              <span class="info-eyebrow">On Cloudflare Pages</span>
+              <ul>
+                <li><code>functions/auth/login</code> opens an Amazon OAuth flow with a PKCE challenge and swaps the returned code for ADP tokens by hitting <code>api.amazon.&lt;tld&gt;/auth/register</code> on your behalf.</li>
+                <li><code>functions/library</code> and <code>functions/license/[asin]</code> are thin pass-throughs to <code>api.audible.&lt;tld&gt;</code>, signing each request with the private key your browser holds and forwarding the response back unchanged.</li>
+                <li><code>functions/source</code> is a byte proxy for Audible's CloudFront audio (so the browser can read the file despite the CDN's CORS policy). It does not store, decrypt, or transcode anything &mdash; just relays bytes with a <code>Range</code> header.</li>
+              </ul>
+            </div>
+            <div class="info-card">
+              <span class="info-eyebrow">What is <em>not</em> here</span>
+              <ul>
+                <li>No database, no KV, no R2. Cloudflare has nothing about you between requests.</li>
+                <li>No analytics, no tracking pixels. The only outbound calls are to Audible / Amazon, Amazon's image CDN for cover art, and the GitHub / Buy Me a Coffee embeds.</li>
+                <li>No DRM bypass for content you do not own. The flow only converts books already in the signed-in Audible account, using the licence data Amazon returns to the registered device.</li>
+              </ul>
+            </div>
+          </div>
+          <p class="info-foot">
+            Source on <a href="https://github.com/joemalthouse/audible-downloader" target="_blank" rel="noopener noreferrer">GitHub</a> &mdash; the Pages Functions and ffmpeg build script are there to inspect.
+          </p>
+        </details>
+      </section>
+
+      <hr class="ornament" aria-hidden="true" />
+
+      <section class="panel connect-panel" id="connectPanel">
+        <div class="section-title">
+          <div>
+            <span class="section-eyebrow">Step one</span>
+            <h2>Connect Audible</h2>
+          </div>
+          <span class="status-tag" id="connectSummary">Not signed in</span>
+        </div>
+
+        <div id="loginStartPanel" class="login-state is-active">
+          <p class="lede">Start with Amazon's Audible sign-in. Your credentials stay on Amazon's page; this app only receives the final authorisation URL needed to finish the device login.</p>
+          <div class="login-grid">
+            <label class="field">
+              <span class="field-label">Marketplace</span>
+              <select id="loginLocaleInput">
+                <option value="uk" selected>United Kingdom &middot; audible.co.uk</option>
+                <option value="us">United States &middot; audible.com</option>
+                <option value="ca">Canada &middot; audible.ca</option>
+                <option value="au">Australia &middot; audible.com.au</option>
+                <option value="de">Germany &middot; audible.de</option>
+                <option value="fr">France &middot; audible.fr</option>
+                <option value="it">Italy &middot; audible.it</option>
+                <option value="es">Spain &middot; audible.es</option>
+                <option value="jp">Japan &middot; audible.co.jp</option>
+                <option value="in">India &middot; audible.in</option>
+              </select>
+            </label>
+            <div class="actions">
+              <button type="button" id="startLoginButton" class="btn-primary">
+                <span>Sign in with Audible</span>
+                <svg viewBox="0 0 16 16" width="14" height="14" aria-hidden="true"><path fill="currentColor" d="M9 2.5l4.5 4.5L9 11.5V8H2.5V6.5H9V2.5z"/></svg>
+              </button>
+            </div>
+          </div>
+        </div>
+
+        <div id="loginWaitingPanel" class="login-state">
+          <p class="lede">Amazon hands the authorisation code back to a page on its own domain. Copy that URL when you see "Page Not Found" &mdash; that's the signal we're done.</p>
+          <ol class="login-steps">
+            <li data-step="1" class="step-done">
+              <span class="step-marker" aria-hidden="true">I</span>
+              <div class="step-body">
+                <strong>Pop-up opened</strong>
+                <p>Amazon's sign-in is in a new window. If the pop-up was blocked, hit <em>Re-open</em>.</p>
+              </div>
+            </li>
+            <li data-step="2" class="step-active">
+              <span class="step-marker" aria-hidden="true">II</span>
+              <div class="step-body">
+                <strong>Sign in on Amazon</strong>
+                <p>Use the same credentials as the Audible mobile app. Two-factor codes work as normal.</p>
+              </div>
+            </li>
+            <li data-step="3">
+              <span class="step-marker" aria-hidden="true">III</span>
+              <div class="step-body">
+                <strong>Copy the URL</strong>
+                <p>Amazon lands you on a "Page Not Found" page on audible.<span id="loginDomainHint">co.uk</span>. That is the page you want &mdash; copy the full address from the bar.</p>
+              </div>
+            </li>
+            <li data-step="4">
+              <span class="step-marker" aria-hidden="true">IV</span>
+              <div class="step-body">
+                <strong>Finish here</strong>
+                <p>Back in this tab, hit <em>Finish sign-in</em>. We read the URL from your clipboard and finalise the handshake.</p>
+              </div>
+            </li>
+          </ol>
+          <div class="actions">
+            <button type="button" id="finishLoginButton" class="btn-primary">Finish sign-in</button>
+            <button type="button" id="reopenLoginButton" class="btn-secondary">Re-open Amazon sign-in</button>
+            <button type="button" id="cancelLoginButton" class="btn-ghost">Cancel</button>
+          </div>
+          <details class="login-manual">
+            <summary>Clipboard didn't work? Paste the URL yourself.</summary>
+            <label class="field">
+              <span class="field-label">Final URL from Amazon</span>
+              <textarea id="loginResponseInput" spellcheck="false" placeholder="https://www.audible.co.uk/ap/maplanding?openid.oa2.authorization_code=..."></textarea>
+            </label>
+          </details>
+        </div>
+
+        <div id="loginSignedInPanel" class="login-state">
+          <div class="signedin">
+            <div class="signedin-meta">
+              <span class="signedin-glyph" aria-hidden="true">&#10003;</span>
+              <div>
+                <strong>You're signed in.</strong>
+                <p>Library loaded below. Click a title to convert it on this device.</p>
+              </div>
+            </div>
+            <div class="actions">
+              <button type="button" id="refreshLibraryButton" class="btn-secondary">Refresh library</button>
+              <button type="button" id="signOutButton" class="btn-ghost">Sign out</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel library-panel">
+        <div class="section-title">
+          <div>
+            <span class="section-eyebrow">Step two</span>
+            <h2>Your library</h2>
+          </div>
+          <span class="status-tag" id="librarySummary">Not loaded</span>
+        </div>
+        <div id="library" class="library"></div>
+      </section>
+
+      <section class="panel download-progress-panel" hidden>
+        <div class="section-title">
+          <div>
+            <span class="section-eyebrow">In progress</span>
+            <h2>Conversion</h2>
+          </div>
+          <span class="status-tag" id="wasmStatus">Not started</span>
+        </div>
+        <div class="progress wasm-progress" aria-hidden="true"><div id="wasmProgressBar" class="bar"></div></div>
+        <pre id="wasmLog" class="log compact">No WASM run yet.</pre>
+      </section>
+
+      <pre id="runtimeLog" hidden></pre>
+
+      <footer class="colophon">
+        <div class="colophon-rule" aria-hidden="true">
+          <span></span>
+          <span class="colophon-ornament">&#x2767;</span>
+          <span></span>
+        </div>
+        <div class="colophon-grid">
+          <div>
+            <p class="colophon-line">Independent open-source project. Not affiliated with Audible, Amazon, or any other vendor.</p>
+            <p class="colophon-line muted">No tracking, no analytics, no telemetry. Source &amp; build scripts on <a href="https://github.com/joemalthouse/audible-downloader" target="_blank" rel="noopener noreferrer">GitHub</a>.</p>
+          </div>
+          <div class="embed-buttons">
+            <a class="support-button github-support" href="https://github.com/joemalthouse/audible-downloader" target="_blank" rel="noopener noreferrer" aria-label="View source on GitHub">
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.58.11.79-.25.79-.55 0-.27-.01-.99-.02-1.94-3.2.69-3.87-1.54-3.87-1.54-.52-1.33-1.27-1.69-1.27-1.69-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.75 2.69 1.24 3.34.95.1-.74.4-1.24.73-1.53-2.55-.29-5.24-1.28-5.24-5.7 0-1.26.45-2.29 1.18-3.1-.12-.29-.51-1.47.11-3.06 0 0 .96-.31 3.15 1.18a10.94 10.94 0 0 1 5.74 0c2.19-1.49 3.15-1.18 3.15-1.18.62 1.59.23 2.77.11 3.06.73.81 1.18 1.84 1.18 3.1 0 4.43-2.7 5.41-5.26 5.69.41.36.78 1.06.78 2.14 0 1.55-.01 2.79-.01 3.17 0 .3.21.67.8.55C20.21 21.38 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg>
+              <span>GitHub</span>
+            </a>
+            <a class="support-button coffee-support" href="https://buymeacoffee.com/joemalthouse" target="_blank" rel="noopener noreferrer">
+              <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path fill="currentColor" d="M5 7h13a2 2 0 0 1 2 2v1a3 3 0 0 1-3 3h-.5l-.5 4.5a2 2 0 0 1-2 1.75H8a2 2 0 0 1-2-1.75L5 7zm12 4h.5a1 1 0 0 0 1-1V9H17v2zM8 4c.667.667.667 1.333 0 2-.667.667-.667 1.333 0 2M11 4c.667.667.667 1.333 0 2-.667.667-.667 1.333 0 2M14 4c.667.667.667 1.333 0 2-.667.667-.667 1.333 0 2"/></svg>
+              <span>Buy me a coffee</span>
+            </a>
+          </div>
+        </div>
+      </footer>
+    </main>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>

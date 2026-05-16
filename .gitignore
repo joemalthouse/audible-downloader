@@ -1,0 +1,13 @@
+node_modules/
+/dist/
+/build/
+.wrangler/
+.dev.vars
+.DS_Store
+*.log
+
+# Local/generated test outputs
+*.m4b
+*.aax
+*.aaxc
+*.libation-fixture.json
