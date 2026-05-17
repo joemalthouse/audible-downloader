@@ -27,7 +27,7 @@ const nodeModule = {
 
 export default [
   js.configs.recommended,
-  { ignores: ["dist/**", "build/**", "node_modules/**", "vendor/**", ".wrangler/**"] },
+  { ignores: ["dist/**", "build/**", "node_modules/**", "vendor/**", ".wrangler/**", "scripts/debug-*.mjs"] },
   { files: ["app.js"], ...browserModule },
   { files: ["auth/callback/finish.js"], ...browserModule },
   { files: ["lib/**/*.js"], ...workerModule },

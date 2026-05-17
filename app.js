@@ -47,6 +47,7 @@ let activeLoginSession = null;
 let activeLoginSignInUrl = "";
 let activeLoginPopup = null;
 let activeLoginPopupTimer = 0;
+let transientSummaryActive = false;
 let audibleIdentity = loadAudibleIdentity();
 
 setCapabilityStatus();
@@ -184,7 +185,6 @@ function renderLoginPanels() {
   syncConnectSummary();
 }
 
-let transientSummaryActive = false;
 function syncConnectSummary() {
   if (transientSummaryActive) return;
   if (audibleIdentity) connectSummary.textContent = "Signed in";
