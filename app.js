@@ -64,15 +64,21 @@ finishLoginButton.addEventListener("click", () => finishAudibleLogin());
 loginResponseInput.addEventListener("paste", handleResponseInputPaste);
 loginResponseInput.addEventListener("input", handleResponseInputChange);
 document.addEventListener("visibilitychange", handleVisibilityChange);
-window.addEventListener("message", handleLoginPostMessage);
+window.addEventListener("storage", handleIdentityStorageEvent);
 
-function handleLoginPostMessage(event) {
-  if (event.origin !== location.origin) return;
-  if (event.source && event.source !== activeLoginPopup) return;
-  const data = event.data;
-  if (!data || data.type !== "audible-auth-callback") return;
-  if (typeof data.responseUrl !== "string") return;
-  finishAudibleLogin(data.responseUrl);
+function handleIdentityStorageEvent(event) {
+  if (event.key !== "audible-downloader-identity") return;
+  if (audibleIdentity) return;
+  const fresh = loadAudibleIdentity();
+  if (!fresh) return;
+  audibleIdentity = fresh;
+  closeLoginPopup();
+  clearLoginSession();
+  loginResponseInput.value = "";
+  clearTransientSummary();
+  log("Signed in via popup.");
+  renderLoginPanels();
+  loadLibrary(true);
 }
 
 function setCapabilityStatus() {
@@ -135,7 +141,7 @@ function renderLibrary() {
 
 async function loadLibrary(refresh) {
   refreshLibraryButton.disabled = true;
-  connectSummary.textContent = "Loading library";
+  setTransientSummary("Loading library");
 
   try {
     if (!audibleIdentity) throw new Error("No authenticated Audible account");
@@ -148,11 +154,7 @@ async function loadLibrary(refresh) {
       const url = `/library?page=${page}${refresh && page === 1 ? "&refresh=1" : ""}`;
       const response = await fetch(url, { cache: "no-store", headers });
       const payload = await response.json().catch(() => ({}));
-      if (!response.ok) {
-        const detail = describeUpstreamError(payload, response.status);
-        connectSummary.textContent = `Library load failed: ${detail}`;
-        throw new Error(detail);
-      }
+      if (!response.ok) throw new Error(describeUpstreamError(payload, response.status));
       books.push(...(payload.books || []));
       total = Number(payload.total || 0);
       if (!payload.books?.length || payload.books.length < LIBRARY_PAGE_SIZE) break;
@@ -160,9 +162,10 @@ async function loadLibrary(refresh) {
       if (page === maxPages) console.warn("library pagination hit cap", { total, fetched: books.length });
     }
     library = books;
-    connectSummary.textContent = "Signed in";
+    clearTransientSummary();
     log(`Loaded ${library.length} library titles.`);
   } catch (error) {
+    setTransientSummary(`Library load failed: ${error.message}`);
     log(`Library load failed: ${error.message}`, "error");
   } finally {
     refreshLibraryButton.disabled = false;
@@ -178,6 +181,25 @@ function renderLoginPanels() {
   loginWaitingPanel.classList.toggle("is-active", !signedIn && waiting);
   loginSignedInPanel.classList.toggle("is-active", signedIn);
   if (waiting) updateLoginStepsState();
+  syncConnectSummary();
+}
+
+let transientSummaryActive = false;
+function syncConnectSummary() {
+  if (transientSummaryActive) return;
+  if (audibleIdentity) connectSummary.textContent = "Signed in";
+  else if (activeLoginId) connectSummary.textContent = "Complete sign-in in the pop-up";
+  else connectSummary.textContent = "Not signed in";
+}
+
+function setTransientSummary(text) {
+  transientSummaryActive = true;
+  connectSummary.textContent = text;
+}
+
+function clearTransientSummary() {
+  transientSummaryActive = false;
+  syncConnectSummary();
 }
 
 function updateLoginStepsState(stage = "amazon") {
@@ -193,7 +215,7 @@ function updateLoginStepsState(stage = "amazon") {
 async function startAudibleLogin() {
   const locale = (loginLocaleInput.value || "uk").trim().toLowerCase();
   startLoginButton.disabled = true;
-  connectSummary.textContent = "Starting sign-in";
+  setTransientSummary("Starting sign-in");
 
   // Open popup synchronously to preserve the user-activation token; we'll
   // navigate it once the auth start endpoint returns the sign-in URL.
@@ -209,7 +231,7 @@ async function startAudibleLogin() {
     if (!response.ok) throw new Error(describeUpstreamError(payload, response.status));
     if (payload.status === "authenticated") {
       if (popup && !popup.closed) popup.close();
-      connectSummary.textContent = "Signed in";
+      clearTransientSummary();
       renderLoginPanels();
       await loadLibrary(true);
       return;
@@ -222,20 +244,20 @@ async function startAudibleLogin() {
     persistLoginSession(payload);
     loginResponseInput.value = "";
     loginDomainHint.textContent = LOCALE_DOMAINS[locale] || "com";
+    clearTransientSummary();
     renderLoginPanels();
     updateLoginStepsState("amazon");
-    connectSummary.textContent = "Complete sign-in in the pop-up";
 
     if (popup && !popup.closed) {
       popup.location.replace(payload.signInUrl);
       bindLoginPopup(popup);
     } else {
-      connectSummary.textContent = "Pop-up blocked - click Re-open Amazon sign-in";
+      setTransientSummary("Pop-up blocked - click Re-open Amazon sign-in");
     }
   } catch (error) {
     if (popup && !popup.closed) popup.close();
     const detail = formatError(error);
-    connectSummary.textContent = `Sign in failed: ${detail}`;
+    setTransientSummary(`Sign in failed: ${detail}`);
     log(`Audible sign in failed: ${detail}`, "error");
   } finally {
     startLoginButton.disabled = false;
@@ -252,7 +274,7 @@ function bindLoginPopup(popup) {
       activeLoginPopup = null;
       if (activeLoginId) {
         updateLoginStepsState("finish");
-        connectSummary.textContent = "Pop-up closed - paste the URL or click Finish sign-in";
+        setTransientSummary("Pop-up closed - paste the URL or click Finish sign-in");
       }
     }
   }, 700);
@@ -266,7 +288,7 @@ function openSignInPopup() {
   }
   const popup = window.open(activeLoginSignInUrl, "audible-signin", "popup=1,width=520,height=760,left=120,top=80");
   if (!popup) {
-    connectSummary.textContent = "Pop-up blocked - re-open Amazon sign-in to allow it";
+    setTransientSummary("Pop-up blocked - re-open Amazon sign-in to allow it");
     return;
   }
   bindLoginPopup(popup);
@@ -282,7 +304,7 @@ function cancelAudibleLogin() {
   closeLoginPopup();
   clearLoginSession();
   loginResponseInput.value = "";
-  connectSummary.textContent = "Sign-in cancelled";
+  setTransientSummary("Sign-in cancelled");
   renderLoginPanels();
 }
 
@@ -337,12 +359,12 @@ function handleReturnedLogin() {
   history.replaceState(null, "", location.pathname);
   audibleIdentity = loadAudibleIdentity();
   if (!audibleIdentity) {
-    connectSummary.textContent = "Sign in failed";
+    setTransientSummary("Sign in failed");
     log("Returned from sign in but no Audible identity was saved.", "error");
     renderLoginPanels();
     return true;
   }
-  connectSummary.textContent = "Signed in";
+  clearTransientSummary();
   renderLoginPanels();
   loadLibrary(true);
   return true;
@@ -351,7 +373,7 @@ function handleReturnedLogin() {
 async function finishAudibleLogin(prefillUrl) {
   if (finishLoginButton.disabled) return;
   finishLoginButton.disabled = true;
-  connectSummary.textContent = "Completing sign-in";
+  setTransientSummary("Completing sign-in");
   updateLoginStepsState("finish");
 
   try {
@@ -359,7 +381,7 @@ async function finishAudibleLogin(prefillUrl) {
       || loginResponseInput.value.trim()
       || await readClipboardForLoginUrl();
     if (!responseUrl) {
-      connectSummary.textContent = "Copy the URL from the Amazon tab, then click Finish sign-in";
+      setTransientSummary("Copy the URL from the Amazon tab, then click Finish sign-in");
       return;
     }
     if (!isLoginCallbackUrl(responseUrl, activeLoginSession?.locale)) throw new Error("That URL doesn't look like Amazon's sign-in result");
@@ -382,13 +404,13 @@ async function finishAudibleLogin(prefillUrl) {
     closeLoginPopup();
     clearLoginSession();
     loginResponseInput.value = "";
-    connectSummary.textContent = "Signed in";
+    clearTransientSummary();
     log("Audible sign in completed.");
     renderLoginPanels();
     await loadLibrary(true);
   } catch (error) {
     const detail = formatError(error);
-    connectSummary.textContent = `Sign in failed: ${detail}`;
+    setTransientSummary(`Sign in failed: ${detail}`);
     log(`Could not finish Audible sign in: ${detail}`, "error");
   } finally {
     finishLoginButton.disabled = false;
@@ -418,7 +440,7 @@ function signOutAudible() {
   library = [];
   jobs.clear();
   inspections.clear();
-  connectSummary.textContent = "Not signed in";
+  clearTransientSummary();
   renderLoginPanels();
   renderLibrary();
   log("Signed out of Audible.");

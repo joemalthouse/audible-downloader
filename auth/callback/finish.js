@@ -10,17 +10,6 @@ async function finish() {
   const responseUrl = location.href;
   history.replaceState(null, "", "/auth/callback/");
 
-  if (window.opener && !window.opener.closed) {
-    try {
-      window.opener.postMessage({ type: "audible-auth-callback", responseUrl }, location.origin);
-      statusEl.textContent = "Returning to the app...";
-      window.close();
-      return;
-    } catch {
-      // fall through to direct-navigation flow
-    }
-  }
-
   const stored = sessionStorage.getItem("audible-downloader-login") || localStorage.getItem("audible-downloader-login");
   if (!stored) throw new Error("No pending Audible login session was found. Return to the app and start sign in again.");
 
@@ -39,6 +28,18 @@ async function finish() {
   localStorage.setItem("audible-downloader-identity", JSON.stringify(payload.identity));
   sessionStorage.removeItem("audible-downloader-login");
   localStorage.removeItem("audible-downloader-login");
-  statusEl.textContent = "Signed in. Returning to your library...";
+
+  statusEl.textContent = "Signed in. Returning to the app...";
+
+  // If this window was opened as a popup, close it; the opener will pick up
+  // the new identity via the storage event. Otherwise navigate to the app.
+  const opened = !!window.opener;
+  if (opened) {
+    setTimeout(() => {
+      window.close();
+      setTimeout(() => location.replace("/?auth=success"), 250);
+    }, 150);
+    return;
+  }
   location.replace("/?auth=success");
 }
