@@ -230,7 +230,7 @@ async function startAudibleLogin() {
     const response = await fetch("/auth/login/start", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ locale, returnTo: `${location.origin}/auth/callback/` }),
+      body: JSON.stringify({ locale }),
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(describeUpstreamError(payload, response.status));
