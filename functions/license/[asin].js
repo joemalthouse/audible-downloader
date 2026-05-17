@@ -1,17 +1,25 @@
-import { AudibleApiError, getDownloadLicense, json, readRequestIdentity } from "../_shared/audible.js";
+import { AudibleApiError, buildProxyUrlPath, getDownloadLicense, json, readSignedAuth, signProxyUrl } from "../_shared/audible.js";
 
 export async function onRequestGet({ request, params, env }) {
-  const auth = readRequestIdentity(request, env);
-  if (!auth) return json({ stage: "auth", error: "Audible identity missing from request" }, 401);
+  const auth = readSignedAuth(request);
+  if (!auth) return json({ stage: "auth", error: "Signed Audible identity missing from request" }, 401);
+  if (!auth.deviceSerialNumber || !auth.amazonAccountId) {
+    return json({ stage: "auth", error: "deviceSerialNumber and amazonAccountId are required for license decryption" }, 400);
+  }
 
   const asin = String(params.asin || "").trim();
   if (!/^[A-Z0-9]{8,16}$/.test(asin)) return json({ stage: "validation", error: "Invalid ASIN", asin }, 400);
 
   try {
-    return json(await getDownloadLicense(auth, asin));
+    const license = await getDownloadLicense(auth, asin);
+    if (license.offlineUrl) {
+      const signature = await signProxyUrl(env.SOURCE_PROXY_SECRET, license.offlineUrl);
+      license.proxyUrl = buildProxyUrlPath(license.offlineUrl, signature);
+    }
+    return json(license);
   } catch (error) {
     if (error instanceof AudibleApiError) {
-      console.error("license audibleFetch failed", { asin, stage: error.stage, status: error.status, detail: error.detail });
+      console.error("license callAudibleApi failed", { asin, stage: error.stage, status: error.status });
       return json({ stage: error.stage, status: error.status, error: error.message, detail: error.detail, asin }, 502);
     }
     console.error("license unexpected", { asin, error: error?.message || error });

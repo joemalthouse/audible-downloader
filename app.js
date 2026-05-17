@@ -1,3 +1,11 @@
+import { signRsaPkcs1 } from "./lib/rsa.js";
+import {
+  LIBRARY_PAGE_SIZE,
+  buildLibraryPath,
+  buildLicensePath,
+  buildLicenseRequestBody,
+} from "./lib/audible-shared.js";
+
 const libraryEl = document.querySelector("#library");
 const librarySummary = document.querySelector("#librarySummary");
 const connectSummary = document.querySelector("#connectSummary");
@@ -56,10 +64,23 @@ finishLoginButton.addEventListener("click", () => finishAudibleLogin());
 loginResponseInput.addEventListener("paste", handleResponseInputPaste);
 loginResponseInput.addEventListener("input", handleResponseInputChange);
 document.addEventListener("visibilitychange", handleVisibilityChange);
+window.addEventListener("message", handleLoginPostMessage);
+
+function handleLoginPostMessage(event) {
+  if (event.origin !== location.origin) return;
+  if (event.source && event.source !== activeLoginPopup) return;
+  const data = event.data;
+  if (!data || data.type !== "audible-auth-callback") return;
+  if (typeof data.responseUrl !== "string") return;
+  finishAudibleLogin(data.responseUrl);
+}
 
 function setCapabilityStatus() {
   if (!capabilityStatus) return;
-  if ("Worker" in window && "DecompressionStream" in window) {
+  const ready = "Worker" in window
+    && "DecompressionStream" in window
+    && typeof navigator.storage?.getDirectory === "function";
+  if (ready) {
     capabilityStatus.textContent = location.port === "5174" ? "Local dev" : "Ready";
     capabilityStatus.classList.add("ok");
     return;
@@ -114,26 +135,31 @@ function renderLibrary() {
 
 async function loadLibrary(refresh) {
   refreshLibraryButton.disabled = true;
-  connectSummary.textContent = "Checking session";
+  connectSummary.textContent = "Loading library";
 
   try {
-    const accountStatus = await fetchAccountStatus();
-    if (!accountStatus.accounts.some((account) => account.authenticated)) {
-      throw new Error("No authenticated Audible account found");
+    if (!audibleIdentity) throw new Error("No authenticated Audible account");
+    const books = [];
+    let total = 0;
+    const maxPages = 100;
+    for (let page = 1; page <= maxPages; page += 1) {
+      const path = buildLibraryPath(page);
+      const headers = await buildSignedAuthHeader("GET", path);
+      const url = `/library?page=${page}${refresh && page === 1 ? "&refresh=1" : ""}`;
+      const response = await fetch(url, { cache: "no-store", headers });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        const detail = describeUpstreamError(payload, response.status);
+        connectSummary.textContent = `Library load failed: ${detail}`;
+        throw new Error(detail);
+      }
+      books.push(...(payload.books || []));
+      total = Number(payload.total || 0);
+      if (!payload.books?.length || payload.books.length < LIBRARY_PAGE_SIZE) break;
+      if (total && books.length >= total) break;
+      if (page === maxPages) console.warn("library pagination hit cap", { total, fetched: books.length });
     }
-
-    const response = await fetch(`/library${refresh ? "?refresh=1" : ""}`, {
-      cache: "no-store",
-      headers: audibleAuthHeaders(),
-    });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      const detail = describeUpstreamError(payload, response.status);
-      connectSummary.textContent = `Library load failed: ${detail}`;
-      throw new Error(detail);
-    }
-
-    library = payload.books || [];
+    library = books;
     connectSummary.textContent = "Signed in";
     log(`Loaded ${library.length} library titles.`);
   } catch (error) {
@@ -143,12 +169,6 @@ async function loadLibrary(refresh) {
     renderLoginPanels();
     renderLibrary();
   }
-}
-
-async function fetchAccountStatus() {
-  const response = await fetch("/auth/accounts", { cache: "no-store", headers: audibleAuthHeaders() });
-  if (!response.ok) throw new Error(`account status HTTP ${response.status}`);
-  return response.json();
 }
 
 function renderLoginPanels() {
@@ -179,7 +199,7 @@ async function startAudibleLogin() {
     const response = await fetch("/auth/login/start", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ locale }),
+      body: JSON.stringify({ locale, returnTo: `${location.origin}/auth/callback/` }),
     });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(describeUpstreamError(payload, response.status));
@@ -268,11 +288,16 @@ function handleResponseInputChange() {
   if (isLoginCallbackUrl(value)) finishAudibleLogin(value);
 }
 
-function isLoginCallbackUrl(value) {
+const AUDIBLE_HOST_RE = /^www\.audible\.(com|co\.uk|ca|com\.au|de|fr|it|es|co\.jp|in|com\.br)$/i;
+function isLoginCallbackUrl(value, locale) {
   if (!value || typeof value !== "string") return false;
   try {
     const url = new URL(value.trim());
-    return /maplanding/i.test(url.pathname) && url.searchParams.has("openid.oa2.authorization_code");
+    if (!url.searchParams.has("openid.oa2.authorization_code")) return false;
+    if (url.origin === location.origin) return url.pathname === "/auth/callback/";
+    if (!AUDIBLE_HOST_RE.test(url.hostname)) return false;
+    if (locale && LOCALE_DOMAINS[locale] && url.hostname !== `www.audible.${LOCALE_DOMAINS[locale]}`) return false;
+    return url.pathname === "/ap/maplanding";
   } catch {
     return false;
   }
@@ -320,7 +345,7 @@ async function finishAudibleLogin(prefillUrl) {
       connectSummary.textContent = "Copy the URL from the Amazon tab, then click Finish sign-in";
       return;
     }
-    if (!isLoginCallbackUrl(responseUrl)) throw new Error("That URL doesn't look like Amazon's sign-in result");
+    if (!isLoginCallbackUrl(responseUrl, activeLoginSession?.locale)) throw new Error("That URL doesn't look like Amazon's sign-in result");
     if (!activeLoginId) throw new Error("Sign-in session expired - start over");
 
     const response = await fetch("/auth/login/finish", {
@@ -388,6 +413,8 @@ async function startBrowserM4bConversion(asin) {
 
   const inputName = `source-${asin}.aax`;
   const outputName = `converted-${asin}.m4b`;
+  const mountPoint = "/in";
+  let mounted = false;
   wasmBusy = true;
   setWasmProgress(0);
   setJob(asin, "Preparing", "Loading converter", 1);
@@ -397,7 +424,7 @@ async function startBrowserM4bConversion(asin) {
 
   try {
     let inspection = inspections.get(asin);
-    if (!inspection?.offlineUrl || !getAaxcKey(inspection)) {
+    if (!inspection?.proxyUrl || !getAaxcKey(inspection)) {
       setJob(asin, "Authorising", "Requesting Audible licence", 3);
       wasmStatus.textContent = "Authorising";
       setWasmProgress(3);
@@ -407,30 +434,31 @@ async function startBrowserM4bConversion(asin) {
     }
 
     const key = getAaxcKey(inspection);
-    if (!inspection.offlineUrl || !key) throw new Error("License did not include source URL and AAXC key material.");
+    if (!inspection.proxyUrl || !key) throw new Error("License did not include proxy URL and AAXC key material.");
 
     if (!wasmFfmpeg?.loaded) await loadWasmCore();
     if (!wasmFfmpeg?.loaded) throw new Error("ffmpeg.wasm did not load.");
 
-    const proxiedUrl = `/source?url=${encodeURIComponent(inspection.offlineUrl)}`;
-    appendWasmLog(`Fetching encrypted source for ${book.title} (${formatBytes(inspection.size || 0)}).`);
+    appendWasmLog(`Streaming encrypted source for ${book.title} (${formatBytes(inspection.size || 0)}).`);
     setJob(asin, "Downloading", "0%", 5);
     renderLibrary();
-    const sourceBytes = await fetchArrayBufferWithProgress(proxiedUrl, inspection.size || 0, (received, total) => {
+    const sourceFile = await downloadSourceToOpfs(inspection.proxyUrl, inputName, (received, total) => {
       const pct = total ? Math.min(45, 5 + (received / total) * 40) : 8;
       const status = total ? `Fetching ${Math.round((received / total) * 100)}%` : `Fetching ${formatBytes(received)}`;
       wasmStatus.textContent = status;
       setWasmProgress(pct);
       setJob(asin, "Downloading", total ? `${formatBytes(received)} / ${formatBytes(total)}` : formatBytes(received), pct);
-      renderLibrary();
+      scheduleRender();
     });
 
-    appendWasmLog(`Writing encrypted source into WASM FS (${formatBytes(sourceBytes.byteLength)}).`);
-    setJob(asin, "Preparing", formatBytes(sourceBytes.byteLength), 48);
+    appendWasmLog(`Mounting source as WORKERFS (${formatBytes(sourceFile.size)}).`);
+    setJob(asin, "Preparing", formatBytes(sourceFile.size), 48);
     wasmStatus.textContent = "Preparing conversion";
     setWasmProgress(48);
     renderLibrary();
-    await wasmFfmpeg.writeFile(inputName, new Uint8Array(sourceBytes));
+    await wasmFfmpeg.createDir(mountPoint).catch(() => {});
+    await wasmFfmpeg.mount("WORKERFS", { files: [sourceFile] }, mountPoint);
+    mounted = true;
 
     appendWasmLog("Converting fetched source to M4B in browser.");
     wasmStatus.textContent = "Converting";
@@ -441,7 +469,7 @@ async function startBrowserM4bConversion(asin) {
     const exitCode = await wasmFfmpeg.exec([
       "-audible_key", key.audibleKey,
       "-audible_iv", key.audibleIv,
-      "-i", inputName,
+      "-i", `${mountPoint}/${inputName}`,
       "-map", "0:a:0",
       "-map_chapters", "0",
       "-c", "copy",
@@ -470,8 +498,9 @@ async function startBrowserM4bConversion(asin) {
     setJob(asin, "Failed", detail, 0, false);
     log(`Browser M4B conversion failed for ${asin}: ${detail}`, "error");
   } finally {
-    await wasmFfmpeg?.deleteFile(inputName).catch(() => {});
-    await wasmFfmpeg?.deleteFile(outputName).catch(() => {});
+    if (mounted) await wasmFfmpeg?.unmount?.(mountPoint).catch(() => {});
+    await wasmFfmpeg?.deleteFile?.(outputName).catch(() => {});
+    await deleteOpfsFile(inputName);
     if (activeConversionAsin === asin) activeConversionAsin = "";
     wasmBusy = false;
     renderLibrary();
@@ -482,8 +511,21 @@ function setJob(asin, status, lastLine, progress, running = true) {
   jobs.set(asin, { running, status, lastLine, progress });
 }
 
+let renderScheduled = false;
+function scheduleRender() {
+  if (renderScheduled) return;
+  renderScheduled = true;
+  requestAnimationFrame(() => {
+    renderScheduled = false;
+    renderLibrary();
+  });
+}
+
 async function fetchLicense(asin) {
-  const response = await fetch(`/license/${encodeURIComponent(asin)}`, { cache: "no-store", headers: audibleAuthHeaders() });
+  const licensePath = buildLicensePath(asin);
+  const licenseBody = JSON.stringify(buildLicenseRequestBody());
+  const headers = await buildSignedAuthHeader("POST", licensePath, licenseBody);
+  const response = await fetch(`/license/${encodeURIComponent(asin)}`, { cache: "no-store", headers });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(describeUpstreamError(payload, response.status));
   return payload;
@@ -528,7 +570,7 @@ async function loadWasmCore() {
             progress: mapped,
             lastLine: time ? formatDurationMicros(time) : percent,
           });
-          renderLibrary();
+          scheduleRender();
         }
       }
     });
@@ -596,8 +638,10 @@ async function saveBlob(blob, suggestedName) {
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = suggestedName;
+  document.body.append(anchor);
   anchor.click();
-  URL.revokeObjectURL(url);
+  anchor.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 function getAaxcKey(license) {
@@ -608,40 +652,53 @@ function getAaxcKey(license) {
   return { audibleKey, audibleIv };
 }
 
-async function fetchArrayBufferWithProgress(url, expectedBytes, onProgress) {
-  const response = await fetch(url, { cache: "no-store" });
-  if (!response.ok) throw new Error(`source fetch HTTP ${response.status}`);
-  const contentLength = Number(response.headers.get("content-length")) || expectedBytes || 0;
-  if (!response.body?.getReader) {
-    const buffer = await response.arrayBuffer();
-    onProgress?.(buffer.byteLength, contentLength || buffer.byteLength);
-    return buffer;
+async function downloadSourceToOpfs(proxyUrl, name, onProgress) {
+  if (!navigator.storage?.getDirectory) {
+    throw new Error("Browser lacks OPFS support. Use a current Chromium build.");
   }
-
-  const reader = response.body.getReader();
-  const chunks = [];
-  let received = 0;
-  for (;;) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-    received += value.byteLength;
-    onProgress?.(received, contentLength);
+  const dir = await navigator.storage.getDirectory();
+  await dir.removeEntry(name).catch(() => {});
+  const handle = await dir.getFileHandle(name, { create: true });
+  const writable = await handle.createWritable();
+  try {
+    const response = await fetch(proxyUrl, { cache: "no-store" });
+    if (!response.ok) throw new Error(`source fetch HTTP ${response.status}`);
+    const total = Number(response.headers.get("content-length")) || 0;
+    const reader = response.body.getReader();
+    let received = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      await writable.write(value);
+      received += value.byteLength;
+      onProgress?.(received, total);
+    }
+  } finally {
+    await writable.close();
   }
-
-  const output = new Uint8Array(received);
-  let offset = 0;
-  for (const chunk of chunks) {
-    output.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return output.buffer;
+  return handle.getFile();
 }
 
+async function deleteOpfsFile(name) {
+  if (!navigator.storage?.getDirectory) return;
+  try {
+    const dir = await navigator.storage.getDirectory();
+    await dir.removeEntry(name);
+  } catch {}
+}
+
+const wasmLogLines = [];
+let wasmLogFlushScheduled = false;
 function appendWasmLog(message) {
   if (!message || !wasmLog) return;
-  const line = `[${new Date().toLocaleTimeString("en-GB")}] ${message}`;
-  wasmLog.textContent = `${line}\n${wasmLog.textContent}`.slice(0, 8000);
+  wasmLogLines.unshift(`[${new Date().toLocaleTimeString("en-GB")}] ${message}`);
+  if (wasmLogLines.length > 80) wasmLogLines.length = 80;
+  if (wasmLogFlushScheduled) return;
+  wasmLogFlushScheduled = true;
+  requestAnimationFrame(() => {
+    wasmLogFlushScheduled = false;
+    wasmLog.textContent = wasmLogLines.join("\n");
+  });
 }
 
 function setWasmProgress(percent) {
@@ -651,14 +708,33 @@ function setWasmProgress(percent) {
 
 function loadAudibleIdentity() {
   try {
-    return JSON.parse(localStorage.getItem("audible-downloader-identity") || "null");
+    const raw = JSON.parse(localStorage.getItem("audible-downloader-identity") || "null");
+    if (!raw) return null;
+    const minimal = pickIdentityFields(raw);
+    if (!minimal.adpToken || !minimal.privateKey) return null;
+    if (raw.accessToken || raw.refreshToken || raw.accessTokenExpiresAt) {
+      localStorage.setItem("audible-downloader-identity", JSON.stringify(minimal));
+    }
+    return minimal;
   } catch {
     return null;
   }
 }
 
 function saveAudibleIdentity(identity) {
-  localStorage.setItem("audible-downloader-identity", JSON.stringify(identity));
+  localStorage.setItem("audible-downloader-identity", JSON.stringify(pickIdentityFields(identity)));
+}
+
+function pickIdentityFields(identity) {
+  return {
+    locale: identity.locale,
+    adpToken: identity.adpToken,
+    privateKey: identity.privateKey,
+    deviceType: identity.deviceType,
+    deviceSerialNumber: identity.deviceSerialNumber,
+    deviceName: identity.deviceName,
+    amazonAccountId: identity.amazonAccountId,
+  };
 }
 
 function persistLoginSession(login) {
@@ -667,31 +743,52 @@ function persistLoginSession(login) {
   localStorage.setItem("audible-downloader-login", payload);
 }
 
-function audibleAuthHeaders() {
-  if (!audibleIdentity) return {};
-  const lean = {
-    locale: audibleIdentity.locale,
-    accessToken: audibleIdentity.accessToken,
-    accessTokenExpiresAt: audibleIdentity.accessTokenExpiresAt,
-    refreshToken: audibleIdentity.refreshToken,
+async function buildSignedAuthHeader(method, path, body = "") {
+  if (!audibleIdentity?.privateKey || !audibleIdentity?.adpToken) {
+    throw new Error("Not signed in");
+  }
+  const date = new Date().toISOString().replace(/\.\d{3}Z$/, "Z");
+  const signature = await signRsaPkcs1(
+    audibleIdentity.privateKey,
+    `${method}\n${path}\n${date}\n${body}\n${audibleIdentity.adpToken}`,
+  );
+  const auth = {
     adpToken: audibleIdentity.adpToken,
-    privateKey: audibleIdentity.privateKey,
+    signature,
+    date,
+    locale: audibleIdentity.locale,
     deviceType: audibleIdentity.deviceType,
     deviceSerialNumber: audibleIdentity.deviceSerialNumber,
-    deviceName: audibleIdentity.deviceName,
     amazonAccountId: audibleIdentity.amazonAccountId,
   };
-  const bytes = new TextEncoder().encode(JSON.stringify(lean));
+  const bytes = new TextEncoder().encode(JSON.stringify(auth));
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return { "x-audible-auth": btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "") };
 }
 
+const runtimeLogLines = [];
+let runtimeLogFlushScheduled = false;
 function log(message, level = "info") {
   if (!runtimeLog) return;
-  const line = `[${new Date().toLocaleTimeString("en-GB")}] ${level.toUpperCase()} ${message}`;
-  runtimeLog.textContent = `${line}\n${runtimeLog.textContent}`.slice(0, 6000);
+  runtimeLogLines.unshift(`[${new Date().toLocaleTimeString("en-GB")}] ${level.toUpperCase()} ${message}`);
+  if (runtimeLogLines.length > 60) runtimeLogLines.length = 60;
+  if (runtimeLogFlushScheduled) return;
+  runtimeLogFlushScheduled = true;
+  requestAnimationFrame(() => {
+    runtimeLogFlushScheduled = false;
+    runtimeLog.textContent = runtimeLogLines.join("\n");
+  });
 }
+
+const RUNTIME_LINE_SUPPRESS_RE = new RegExp([
+  "^(ffmpeg version|built with|configuration:|libav|libsw|libpostproc)",
+  "^(Input #|Output #|Metadata:|Chapters:|Chapter #|Stream #|Stream mapping:|Press \\[q\\]|size=)",
+  "^(major_brand|minor_version|compatible_brands|creation_time|title|artist|album|album_artist|genre|comment|copyright|date|encoder|handler_name|vendor_id)",
+  "stream 0, timescale not set",
+  "video:0kB audio:\\d+kB subtitle:0kB other streams:0kB",
+].join("|"), "i");
+const RUNTIME_LINE_KEEP_RE = /(error|failed|invalid|unsupported|unable|not found|warning)/i;
 
 function sanitizeRuntimeLine(value) {
   const line = String(value || "")
@@ -699,13 +796,8 @@ function sanitizeRuntimeLine(value) {
     .replace(/[0-9a-f]{32}/gi, "[hex32]")
     .trim();
   if (!line || line === "Aborted()") return "";
-  if (/^(ffmpeg version|built with|configuration:|libav|libsw|libpostproc)/i.test(line)) return "";
-  if (/^(Input #|Output #|Metadata:|Chapters:|Chapter #|Stream #|Stream mapping:|Press \[q\]|size=)/.test(line)) return "";
-  if (/^(major_brand|minor_version|compatible_brands|creation_time|title|artist|album|album_artist|genre|comment|copyright|date|encoder|handler_name|vendor_id)/.test(line)) return "";
-  if (/stream 0, timescale not set/i.test(line)) return "";
-  if (/video:0kB audio:\d+kB subtitle:0kB other streams:0kB/i.test(line)) return "";
-  if (/(error|failed|invalid|unsupported|unable|not found|warning)/i.test(line)) return line;
-  return "";
+  if (RUNTIME_LINE_SUPPRESS_RE.test(line)) return "";
+  return RUNTIME_LINE_KEEP_RE.test(line) ? line : "";
 }
 
 function formatError(error) {
@@ -722,12 +814,17 @@ function formatDurationMicros(value) {
   return `${hours}:${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
 }
 
+const WIN_RESERVED_RE = /^(CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])(\..*)?$/i;
 function safeFileName(value) {
-  return String(value || "audiobook")
+  let name = String(value || "audiobook")
+    // eslint-disable-next-line no-control-regex
     .replace(/[<>:"/\\|?*\x00-\x1f]/g, " ")
     .replace(/\s+/g, " ")
+    .replace(/[. ]+$/, "")
     .trim()
     .slice(0, 160) || "audiobook";
+  if (WIN_RESERVED_RE.test(name)) name = `_${name}`;
+  return name;
 }
 
 function bookInitials(book) {

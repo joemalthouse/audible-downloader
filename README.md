@@ -107,6 +107,24 @@ Required GitHub configuration:
 - Optional variable `CLOUDFLARE_PAGES_PROJECT` if the Pages project is
   not named `audible-downloader`
 
+Required Cloudflare Pages configuration (set once per project):
+
+- Secret `SOURCE_PROXY_SECRET` — random 32+ byte value used by the
+  Pages Functions to HMAC-sign CloudFront URLs handed to the
+  `/source` proxy. Generate with `openssl rand -hex 32` and install
+  via `npx wrangler pages secret put SOURCE_PROXY_SECRET --project-name=audible-downloader`.
+
+For local development, put the same variable in a `.dev.vars` file at
+the repo root (already gitignored):
+
+```
+SOURCE_PROXY_SECRET=<paste hex from openssl rand>
+```
+
+If `.dev.vars` is missing, the helper generates an ephemeral secret per
+process boot; signed URLs from `/license` will stop working when the
+helper restarts.
+
 Build the Cloudflare Pages output locally:
 
 ```bash

@@ -5,10 +5,15 @@
   "type": "module",
   "scripts": {
     "build": "node scripts/build-cloudflare-dist.mjs",
-    "check": "node --check app.js && node --check helper-server.mjs && node --check scripts/build-cloudflare-dist.mjs && find functions -name '*.js' -print -exec node --check {} \\;",
+    "check": "node --check app.js && node --check helper-server.mjs && node --check scripts/build-cloudflare-dist.mjs && find functions lib -name '*.js' -print -exec node --check {} \\;",
+    "lint": "eslint .",
+    "test": "node --test test/*.test.mjs",
     "deploy": "npm run build && npx wrangler pages deploy dist --project-name=audible-downloader"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.4.0",
+    "globals": "^17.6.0",
     "wrangler": "^4.0.0"
   },
   "dependencies": {

@@ -1,10 +1,23 @@
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
-import { extname, join, normalize } from "node:path";
-import { audibleFetch, createLoginStart, finishLogin, getDownloadLicense, normaliseLibrary } from "./functions/_shared/audible.js";
+import { extname, resolve, sep } from "node:path";
+import {
+  AudibleApiError,
+  buildProxyUrlPath,
+  callAudibleApi,
+  createLoginStart,
+  finishLogin,
+  getDownloadLicense,
+  normaliseLibrary,
+  readSignedAuth,
+  signProxyUrl,
+  verifyProxyUrl,
+} from "./functions/_shared/audible.js";
+import { LIBRARY_PAGE_SIZE, buildLibraryPath } from "./lib/audible-shared.js";
 
 const root = process.cwd();
 const port = Number(process.env.PORT || 5174);
+const sourceProxySecret = process.env.SOURCE_PROXY_SECRET || generateEphemeralSecret();
 
 const contentTypes = {
   ".html": "text/html; charset=utf-8",
@@ -13,16 +26,22 @@ const contentTypes = {
   ".json": "application/json; charset=utf-8",
   ".wasm": "application/wasm",
 };
-const isolationHeaders = {
+const securityHeaders = {
   "cross-origin-opener-policy": "same-origin",
   "cross-origin-embedder-policy": "credentialless",
+  "content-security-policy": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self' blob:; img-src 'self' https://m.media-amazon.com data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; manifest-src 'self'",
+  "referrer-policy": "no-referrer",
+  "permissions-policy": "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()",
+  "x-content-type-options": "nosniff",
+  "x-frame-options": "DENY",
 };
+const RANGE_RE = /^bytes=\d+-\d*$/;
+const PASSTHROUGH_HEADERS = ["content-type", "content-range", "accept-ranges", "cache-control", "last-modified", "etag"];
 
 createServer(async (req, res) => {
   try {
     if (req.url?.startsWith("/source")) return await proxySource(req, res);
     if (req.url?.startsWith("/library")) return await serveLibrary(req, res);
-    if (req.url?.startsWith("/auth/accounts")) return await serveAccounts(req, res);
     if (req.url?.startsWith("/auth/login")) return await handleLogin(req, res);
     if (req.url?.startsWith("/license/")) return await serveLicense(req, res);
     await serveStatic(req, res);
@@ -37,25 +56,24 @@ createServer(async (req, res) => {
 async function serveStatic(req, res) {
   const url = new URL(req.url || "/", `http://${req.headers.host}`);
   const requested = url.pathname === "/" ? "/index.html" : url.pathname;
-  const safePath = normalize(requested).replace(/^(\.\.[/\\])+/, "");
-  const filePath = join(root, safePath);
+  const filePath = resolve(root, "." + requested);
+  if (filePath !== root && !filePath.startsWith(root + sep)) {
+    res.writeHead(403);
+    res.end("Forbidden");
+    return;
+  }
   const body = await readFile(filePath);
 
   res.writeHead(200, {
     "content-type": filePath.endsWith(".wasm.gz") ? "application/wasm" : contentTypes[extname(filePath)] || "application/octet-stream",
     ...(filePath.endsWith(".wasm.gz") ? { "content-encoding": "gzip" } : {}),
     "cache-control": "no-store",
-    ...isolationHeaders,
+    ...securityHeaders,
   });
   res.end(body);
 }
 
 async function proxySource(req, res) {
-  if (req.method === "OPTIONS") {
-    res.writeHead(204, corsHeaders());
-    res.end();
-    return;
-  }
   if (!["GET", "HEAD"].includes(req.method || "GET")) {
     writeJson(res, 405, { error: "Method not allowed" });
     return;
@@ -63,28 +81,50 @@ async function proxySource(req, res) {
 
   const incomingUrl = new URL(req.url || "/", `http://${req.headers.host}`);
   const target = incomingUrl.searchParams.get("url");
-  if (!target) {
-    writeJson(res, 400, { error: "Missing url" });
+  const sig = incomingUrl.searchParams.get("sig");
+  const exp = incomingUrl.searchParams.get("exp");
+  if (!target || !sig || !exp) {
+    writeJson(res, 400, { error: "Missing url, sig, or exp" });
     return;
   }
 
-  const parsed = new URL(target);
+  let parsed;
+  try { parsed = new URL(target); }
+  catch { writeJson(res, 400, { error: "Invalid target URL" }); return; }
+
+  if (parsed.protocol !== "https:") {
+    writeJson(res, 400, { error: "Only https sources are allowed" });
+    return;
+  }
   if (!parsed.hostname.endsWith(".cloudfront.net")) {
-    writeJson(res, 400, { error: "Only CloudFront source URLs are allowed" });
+    writeJson(res, 400, { error: "Only Audible CloudFront source URLs are allowed" });
+    return;
+  }
+
+  if (!(await verifyProxyUrl(sourceProxySecret, target, sig, exp))) {
+    writeJson(res, 403, { error: "Invalid or expired proxy signature" });
     return;
   }
 
   const headers = new Headers();
-  const range = req.headers.range;
-  if (range) headers.set("range", Array.isArray(range) ? range[0] : range);
+  const rangeRaw = req.headers.range;
+  const range = Array.isArray(rangeRaw) ? rangeRaw[0] : rangeRaw;
+  if (range) {
+    if (range.length > 200 || !RANGE_RE.test(range)) {
+      writeJson(res, 400, { error: "Invalid Range header" });
+      return;
+    }
+    headers.set("range", range);
+  }
   headers.set("user-agent", "com.audible.playersdk.player/3.96.1 (Linux;Android 14) AndroidXMedia3/1.3.0");
 
   const upstream = await fetch(parsed, { method: req.method, headers, redirect: "manual" });
 
-  const responseHeaders = corsHeaders();
-  upstream.headers.forEach((value, name) => {
-    if (!shouldDropResponseHeader(name)) responseHeaders[name] = value;
-  });
+  const responseHeaders = {};
+  for (const name of PASSTHROUGH_HEADERS) {
+    const value = upstream.headers.get(name);
+    if (value) responseHeaders[name] = value;
+  }
 
   res.writeHead(upstream.status, responseHeaders);
   if (req.method !== "HEAD" && upstream.body) {
@@ -93,64 +133,47 @@ async function proxySource(req, res) {
   res.end();
 }
 
-function serveAccounts(req, res) {
+async function serveLibrary(req, res) {
   if (req.method !== "GET") {
     writeJson(res, 405, { error: "Method not allowed" });
     return;
   }
-  const identity = readBrowserIdentity(req);
-  if (!identity) {
-    writeJson(res, 200, { source: "no identity", authenticated: false, accounts: [] });
+  const auth = readSignedAuth(toFetchRequest(req));
+  if (!auth) {
+    writeJson(res, 401, { stage: "auth", error: "Signed Audible identity missing from request" });
     return;
   }
-  writeJson(res, 200, {
-    source: "browser identity",
-    authenticated: true,
-    accounts: [{
-      id: identity.amazonAccountId || "audible",
-      name: identity.deviceName || "Audible account",
-      locale: identity.locale || "uk",
-      scanLibrary: true,
-      authenticated: true,
-    }],
-  });
-}
+  const url = new URL(req.url || "/", `http://${req.headers.host}`);
+  const page = Math.max(1, Number(url.searchParams.get("page") || 1));
+  const path = buildLibraryPath(page);
 
-async function serveLibrary(req, res) {
-  const identity = readBrowserIdentity(req);
-  if (!identity) {
-    writeJson(res, 401, { stage: "auth", error: "Audible identity missing from request" });
-    return;
-  }
   try {
-    const payload = await fetchAudibleLibrary(identity);
-    writeJson(res, 200, payload);
-  } catch (error) {
-    writeJson(res, 500, { error: error?.message || String(error) });
-  }
-}
-
-async function fetchAudibleLibrary(identity) {
-  const responseGroups = [
-    "contributors", "media", "product_attrs",
-    "product_desc", "product_extended_attrs", "series",
-  ].join(",");
-  const pageSize = 50;
-  const books = [];
-  let total = 0;
-  let firstPayload = null;
-  for (let page = 1; page <= 50; page += 1) {
-    const path = `/1.0/library?num_results=${pageSize}&page=${page}&response_groups=${encodeURIComponent(responseGroups)}&image_sizes=500%2C300`;
-    const { response } = await audibleFetch(identity, path);
-    const payload = await response.json();
-    if (!response.ok) throw new Error(`Audible library HTTP ${response.status}`);
-    if (!firstPayload) firstPayload = payload;
+    const response = await callAudibleApi(auth, path);
+    const text = await response.text();
+    let payload;
+    try { payload = text ? JSON.parse(text) : {}; } catch { payload = { raw: text.slice(0, 400) }; }
+    if (!response.ok) {
+      writeJson(res, response.status, { stage: "audible_api", page, path, status: response.status, detail: payload });
+      return;
+    }
     const normalised = normaliseLibrary(payload);
-    books.push(...normalised.books);
-    total = Number(payload.total_results || payload.total || normalised.count || books.length);
-    if (normalised.books.length < pageSize || books.length >= total) break;
+    const total = Number(payload.total_results || payload.total || normalised.count || 0);
+    writeJson(res, 200, {
+      source: "audible api",
+      exportedAt: new Date().toISOString(),
+      page,
+      pageSize: LIBRARY_PAGE_SIZE,
+      total,
+      count: normalised.books.length,
+      books: normalised.books,
+    });
+  } catch (error) {
+    if (error instanceof AudibleApiError) {
+      writeJson(res, 502, { stage: error.stage, status: error.status, error: error.message, detail: error.detail, page, path });
+      return;
+    }
+    writeJson(res, 500, { stage: "unexpected", error: error?.message || String(error) });
   }
-  return { ...normaliseLibrary(firstPayload || {}), count: books.length, total, books };
 }
 
 async function serveLicense(req, res) {
@@ -165,14 +188,27 @@ async function serveLicense(req, res) {
     return;
   }
 
-  const identity = readBrowserIdentity(req);
-  if (!identity) {
-    writeJson(res, 401, { stage: "auth", error: "Audible identity missing from request" });
+  const auth = readSignedAuth(toFetchRequest(req));
+  if (!auth) {
+    writeJson(res, 401, { stage: "auth", error: "Signed Audible identity missing from request" });
+    return;
+  }
+  if (!auth.deviceSerialNumber || !auth.amazonAccountId) {
+    writeJson(res, 400, { stage: "auth", error: "deviceSerialNumber and amazonAccountId are required for license decryption" });
     return;
   }
   try {
-    writeJson(res, 200, await getDownloadLicense(identity, asin));
+    const license = await getDownloadLicense(auth, asin);
+    if (license.offlineUrl) {
+      const signature = await signProxyUrl(sourceProxySecret, license.offlineUrl);
+      license.proxyUrl = buildProxyUrlPath(license.offlineUrl, signature);
+    }
+    writeJson(res, 200, license);
   } catch (error) {
+    if (error instanceof AudibleApiError) {
+      writeJson(res, 502, { stage: error.stage, status: error.status, error: error.message, detail: error.detail, asin });
+      return;
+    }
     writeJson(res, 500, { error: error?.message || String(error) });
   }
 }
@@ -214,29 +250,23 @@ async function handleLogin(req, res) {
   writeJson(res, 404, { error: "Unknown login route" });
 }
 
-function readBrowserIdentity(req) {
-  const header = req.headers["x-audible-auth"];
-  if (!header || typeof header !== "string") return null;
-  try {
-    const padded = header.replace(/-/g, "+").replace(/_/g, "/").padEnd(Math.ceil(header.length / 4) * 4, "=");
-    return JSON.parse(Buffer.from(padded, "base64").toString("utf8"));
-  } catch {
-    return null;
-  }
-}
-
-function corsHeaders() {
+function toFetchRequest(req) {
   return {
-    "access-control-allow-origin": "*",
-    "access-control-allow-methods": "GET, HEAD, OPTIONS",
-    "access-control-allow-headers": "range, x-audible-auth",
-    "access-control-expose-headers": "content-length, content-range, accept-ranges",
+    headers: {
+      get(name) {
+        const value = req.headers[name.toLowerCase()];
+        return Array.isArray(value) ? value[0] : value || null;
+      },
+    },
   };
 }
 
-function shouldDropResponseHeader(name) {
-  const lower = name.toLowerCase();
-  return lower === "content-encoding" || lower === "content-length" || lower === "set-cookie";
+function generateEphemeralSecret() {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  const hex = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  console.warn("[helper] SOURCE_PROXY_SECRET not set; using ephemeral dev secret. Set it in .dev.vars to persist across restarts.");
+  return hex;
 }
 
 async function readJsonBody(req) {

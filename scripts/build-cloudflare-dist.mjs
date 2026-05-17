@@ -1,7 +1,8 @@
 import { cp, mkdir, rm, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const root = new URL("..", import.meta.url).pathname;
+const root = fileURLToPath(new URL("..", import.meta.url));
 const dist = join(root, "dist");
 
 const files = [
@@ -9,8 +10,10 @@ const files = [
   "auth",
   "styles.css",
   "app.js",
+  "lib",
   "_headers",
   "wrangler.toml",
+  "functions",
   "vendor/ffmpeg/ffmpeg/dist/esm",
   "vendor/ffmpeg/core/dist/esm/ffmpeg-core.js",
   "vendor/ffmpeg/core/dist/esm/ffmpeg-core.wasm.gz",
