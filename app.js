@@ -48,6 +48,11 @@ let activeLoginSignInUrl = "";
 let activeLoginPopup = null;
 let activeLoginPopupTimer = 0;
 let transientSummaryActive = false;
+let renderScheduled = false;
+const wasmLogLines = [];
+let wasmLogFlushScheduled = false;
+const runtimeLogLines = [];
+let runtimeLogFlushScheduled = false;
 let audibleIdentity = loadAudibleIdentity();
 
 setCapabilityStatus();
@@ -550,7 +555,6 @@ function setJob(asin, status, lastLine, progress, running = true) {
   jobs.set(asin, { running, status, lastLine, progress });
 }
 
-let renderScheduled = false;
 function scheduleRender() {
   if (renderScheduled) return;
   renderScheduled = true;
@@ -726,8 +730,6 @@ async function deleteOpfsFile(name) {
   } catch {}
 }
 
-const wasmLogLines = [];
-let wasmLogFlushScheduled = false;
 function appendWasmLog(message) {
   if (!message || !wasmLog) return;
   wasmLogLines.unshift(`[${new Date().toLocaleTimeString("en-GB")}] ${message}`);
@@ -806,8 +808,6 @@ async function buildSignedAuthHeader(method, path, body = "") {
   return { "x-audible-auth": btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "") };
 }
 
-const runtimeLogLines = [];
-let runtimeLogFlushScheduled = false;
 function log(message, level = "info") {
   if (!runtimeLog) return;
   runtimeLogLines.unshift(`[${new Date().toLocaleTimeString("en-GB")}] ${level.toUpperCase()} ${message}`);
