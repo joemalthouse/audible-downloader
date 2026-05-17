@@ -195,6 +195,10 @@ async function startAudibleLogin() {
   startLoginButton.disabled = true;
   connectSummary.textContent = "Starting sign-in";
 
+  // Open popup synchronously to preserve the user-activation token; we'll
+  // navigate it once the auth start endpoint returns the sign-in URL.
+  const popup = window.open("about:blank", "audible-signin", "popup=1,width=520,height=760,left=120,top=80");
+
   try {
     const response = await fetch("/auth/login/start", {
       method: "POST",
@@ -204,6 +208,7 @@ async function startAudibleLogin() {
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(describeUpstreamError(payload, response.status));
     if (payload.status === "authenticated") {
+      if (popup && !popup.closed) popup.close();
       connectSummary.textContent = "Signed in";
       renderLoginPanels();
       await loadLibrary(true);
@@ -220,8 +225,15 @@ async function startAudibleLogin() {
     renderLoginPanels();
     updateLoginStepsState("amazon");
     connectSummary.textContent = "Complete sign-in in the pop-up";
-    openSignInPopup();
+
+    if (popup && !popup.closed) {
+      popup.location.replace(payload.signInUrl);
+      bindLoginPopup(popup);
+    } else {
+      connectSummary.textContent = "Pop-up blocked - click Re-open Amazon sign-in";
+    }
   } catch (error) {
+    if (popup && !popup.closed) popup.close();
     const detail = formatError(error);
     connectSummary.textContent = `Sign in failed: ${detail}`;
     log(`Audible sign in failed: ${detail}`, "error");
@@ -230,17 +242,8 @@ async function startAudibleLogin() {
   }
 }
 
-function openSignInPopup() {
-  if (!activeLoginSignInUrl) return;
-  if (activeLoginPopup && !activeLoginPopup.closed) {
-    activeLoginPopup.focus();
-    return;
-  }
-  activeLoginPopup = window.open(activeLoginSignInUrl, "audible-signin", "popup=1,width=520,height=760,left=120,top=80");
-  if (!activeLoginPopup) {
-    connectSummary.textContent = "Pop-up blocked - re-open Amazon sign-in to allow it";
-    return;
-  }
+function bindLoginPopup(popup) {
+  activeLoginPopup = popup;
   clearInterval(activeLoginPopupTimer);
   activeLoginPopupTimer = setInterval(() => {
     if (!activeLoginPopup || activeLoginPopup.closed) {
@@ -253,6 +256,20 @@ function openSignInPopup() {
       }
     }
   }, 700);
+}
+
+function openSignInPopup() {
+  if (!activeLoginSignInUrl) return;
+  if (activeLoginPopup && !activeLoginPopup.closed) {
+    activeLoginPopup.focus();
+    return;
+  }
+  const popup = window.open(activeLoginSignInUrl, "audible-signin", "popup=1,width=520,height=760,left=120,top=80");
+  if (!popup) {
+    connectSummary.textContent = "Pop-up blocked - re-open Amazon sign-in to allow it";
+    return;
+  }
+  bindLoginPopup(popup);
 }
 
 function reopenSignInPopup() {

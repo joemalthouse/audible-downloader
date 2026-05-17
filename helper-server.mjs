@@ -27,8 +27,7 @@ const contentTypes = {
   ".wasm": "application/wasm",
 };
 const securityHeaders = {
-  "cross-origin-opener-policy": "same-origin",
-  "cross-origin-embedder-policy": "credentialless",
+  "cross-origin-opener-policy": "same-origin-allow-popups",
   "content-security-policy": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self' blob:; img-src 'self' https://m.media-amazon.com data:; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; form-action 'none'; frame-ancestors 'none'; base-uri 'none'; object-src 'none'; manifest-src 'self'",
   "referrer-policy": "no-referrer",
   "permissions-policy": "accelerometer=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()",
