@@ -68,6 +68,26 @@ let beforeUnloadHandlerInstalled = false;
 const trustedTypesPolicy = (typeof window !== "undefined" && window.trustedTypes?.createPolicy)
   ? window.trustedTypes.createPolicy("audible-app", { createHTML: (input) => input })
   : null;
+
+// Default policy: same-origin TrustedScriptURL passthrough so
+// ServiceWorker.register, new Worker(...), and ffmpeg's importScripts
+// all keep working under require-trusted-types-for 'script'. We refuse
+// cross-origin script URLs and never auto-trust raw HTML or scripts.
+if (typeof window !== "undefined" && window.trustedTypes?.createPolicy) {
+  try {
+    window.trustedTypes.createPolicy("default", {
+      createScriptURL: (input) => {
+        const url = new URL(input, location.href);
+        if (url.origin !== location.origin) throw new Error(`Blocked cross-origin script URL: ${input}`);
+        return input;
+      },
+      createHTML: () => { throw new Error("HTML must go through the audible-app policy"); },
+      createScript: () => { throw new Error("Inline scripts are not permitted"); },
+    });
+  } catch {
+    // Policy already exists or browser blocks the name; not fatal.
+  }
+}
 let audibleIdentity = loadAudibleIdentity();
 
 setCapabilityStatus();
