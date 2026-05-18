@@ -1,11 +1,13 @@
 // Service worker for the static app shell + ffmpeg core. Bump CACHE_VERSION on
-// any change to shell files to force older clients onto the new cache.
+// any change to shell files (or to invalidate cached response headers like CSP).
 
-const CACHE_VERSION = "v3";
+const CACHE_VERSION = "v5";
 const SHELL_CACHE = `audible-shell-${CACHE_VERSION}`;
+
+// Long-lived assets cached aggressively. We deliberately omit "/" and
+// "/index.html" so the HTML (and its response headers like CSP) always come
+// from the network and stale policy directives can never get pinned in cache.
 const SHELL_PATHS = [
-  "/",
-  "/index.html",
   "/app.js",
   "/styles.css",
   "/lib/audible-shared.js",
@@ -46,11 +48,17 @@ self.addEventListener("fetch", (event) => {
   if (url.origin !== self.location.origin) return;
   if (BYPASS_PATHS.some((path) => url.pathname.startsWith(path))) return;
 
+  const isHtml = request.mode === "navigate"
+    || request.destination === "document"
+    || request.headers.get("accept")?.includes("text/html");
+
+  // Never cache HTML (or its CSP headers).
+  if (isHtml) return;
+
   event.respondWith((async () => {
     const cache = await caches.open(SHELL_CACHE);
-    const cached = await cache.match(request, { ignoreSearch: false });
+    const cached = await cache.match(request);
     if (cached) {
-      // Stale-while-revalidate for the app shell.
       fetch(request).then((response) => {
         if (response.ok) cache.put(request, response.clone()).catch(() => {});
       }).catch(() => {});
@@ -63,8 +71,7 @@ self.addEventListener("fetch", (event) => {
       }
       return response;
     } catch {
-      const fallback = await cache.match("/");
-      return fallback || new Response("Offline", { status: 503 });
+      return new Response("Offline", { status: 503 });
     }
   })());
 });
