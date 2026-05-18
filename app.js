@@ -458,6 +458,25 @@ async function startBrowserM4bConversion(asin) {
   const inputName = `source-${asin}.aax`;
   const outputName = `converted-${asin}.m4b`;
   const mountPoint = "/in";
+  const suggestedName = `${safeFileName(book.title)} [${asin}].m4b`;
+
+  // The browser's user-activation token only lasts a few seconds, so we must
+  // call showSaveFilePicker while it is still valid. The conversion can take
+  // many minutes, well past the activation window.
+  let saveHandle = null;
+  if ("showSaveFilePicker" in window) {
+    try {
+      saveHandle = await window.showSaveFilePicker({
+        suggestedName,
+        types: [{ description: "M4B audiobook", accept: { "audio/mp4": [".m4b", ".m4a", ".mp4"] } }],
+      });
+    } catch (error) {
+      if (error?.name === "AbortError") return;
+      log(`Save dialog failed: ${formatError(error)}`, "error");
+      return;
+    }
+  }
+
   let mounted = false;
   wasmBusy = true;
   setWasmProgress(0);
@@ -527,12 +546,19 @@ async function startBrowserM4bConversion(asin) {
     setJob(asin, "Ready to save", "Saving M4B", 96);
     renderLibrary();
     const outputBytes = await wasmFfmpeg.readFile(outputName);
-    const blob = new Blob([outputBytes], { type: "audio/mp4" });
-    await saveBlob(blob, `${safeFileName(book.title)} [${asin}].m4b`);
-    appendWasmLog(`Downloaded and converted ${book.title}: ${formatBytes(blob.size)} M4B.`);
+    const outputSize = outputBytes.byteLength;
+    if (saveHandle) {
+      const writable = await saveHandle.createWritable();
+      await writable.write(outputBytes);
+      await writable.close();
+    } else {
+      const blob = new Blob([outputBytes], { type: "audio/mp4" });
+      saveBlobViaAnchor(blob, suggestedName);
+    }
+    appendWasmLog(`Downloaded and converted ${book.title}: ${formatBytes(outputSize)} M4B.`);
     wasmStatus.textContent = "Converted";
     setWasmProgress(100);
-    setJob(asin, "Downloaded", formatBytes(blob.size), 100, false);
+    setJob(asin, "Downloaded", formatBytes(outputSize), 100, false);
     log(`Browser M4B conversion finished for ${book.title} (${asin}).`);
   } catch (error) {
     wasmStatus.textContent = "Convert failed";
@@ -660,23 +686,7 @@ async function decompressGzip(bytes) {
   return new Uint8Array(await new Response(stream).arrayBuffer());
 }
 
-async function saveBlob(blob, suggestedName) {
-  if ("showSaveFilePicker" in window) {
-    try {
-      const handle = await window.showSaveFilePicker({
-        suggestedName,
-        types: [{ description: "M4B audiobook", accept: { "audio/mp4": [".m4b", ".m4a", ".mp4"] } }],
-      });
-      const writable = await handle.createWritable();
-      await writable.write(blob);
-      await writable.close();
-      return;
-    } catch (error) {
-      if (error?.name !== "AbortError") throw error;
-      return;
-    }
-  }
-
+function saveBlobViaAnchor(blob, suggestedName) {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
