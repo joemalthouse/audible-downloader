@@ -5,8 +5,10 @@ pages_build_output_dir = "dist"
 [vars]
 AUDIBLE_MARKETPLACE = "uk"
 
-[[unsafe.bindings]]
-name = "AUTH_LIMITER"
-type = "ratelimit"
-namespace_id = "1001"
-simple = { limit = 30, period = 60 }
+# Cloudflare Pages does not accept [[unsafe.bindings]] in wrangler.toml.
+# To enable the rate limit referenced by functions/auth/login/start.js,
+# add a Rate Limit binding via the Cloudflare dashboard:
+#   Workers & Pages -> audible-downloader -> Settings -> Functions ->
+#   Bindings -> Add binding -> Rate Limit
+# Use variable name "AUTH_LIMITER", limit 30, period 60.
+# The function falls back to no rate limiting if the binding is absent.
