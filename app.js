@@ -376,6 +376,18 @@ async function loadLibrary(refresh) {
     }
     clearTransientSummary();
     log(`Loaded ${library.length} library titles.`);
+    if (books.length) {
+      const sample = books[0];
+      console.debug("[library] sample book fields", {
+        asin: sample.asin,
+        hasNarrators: Boolean(sample.narrators),
+        hasSynopsis: Boolean(sample.synopsis),
+        hasSeries: Array.isArray(sample.series) && sample.series.length > 0,
+        hasPublisher: Boolean(sample.publisher),
+        hasReleaseDate: Boolean(sample.releaseDate),
+        hasLanguage: Boolean(sample.language),
+      });
+    }
     preloadFfmpegCore();
     if (librarySearchInput && document.activeElement === document.body) {
       librarySearchInput.focus({ preventScroll: true });
@@ -392,6 +404,7 @@ async function loadLibrary(refresh) {
 
 const LIBRARY_DB = "audible-downloader";
 const LIBRARY_STORE = "library-cache";
+const LIBRARY_CACHE_SCHEMA = 2;
 
 function openLibraryDb() {
   return new Promise((resolve, reject) => {
@@ -408,12 +421,15 @@ async function loadCachedLibrary(accountId) {
   const db = await openLibraryDb().catch(() => null);
   if (!db) return null;
   try {
-    return await new Promise((resolve) => {
+    const entry = await new Promise((resolve) => {
       const tx = db.transaction(LIBRARY_STORE, "readonly");
       const req = tx.objectStore(LIBRARY_STORE).get(accountId);
       req.onsuccess = () => resolve(req.result || null);
       req.onerror = () => resolve(null);
     });
+    if (!entry) return null;
+    if (entry.schema !== LIBRARY_CACHE_SCHEMA) return null;
+    return entry;
   } finally { db.close(); }
 }
 
@@ -424,7 +440,7 @@ async function saveCachedLibrary(accountId, books) {
   try {
     await new Promise((resolve) => {
       const tx = db.transaction(LIBRARY_STORE, "readwrite");
-      tx.objectStore(LIBRARY_STORE).put({ books, savedAt: Date.now() }, accountId);
+      tx.objectStore(LIBRARY_STORE).put({ schema: LIBRARY_CACHE_SCHEMA, books, savedAt: Date.now() }, accountId);
       tx.oncomplete = () => resolve();
       tx.onerror = () => resolve();
     });
