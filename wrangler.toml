@@ -4,3 +4,9 @@ pages_build_output_dir = "dist"
 
 [vars]
 AUDIBLE_MARKETPLACE = "uk"
+
+[[unsafe.bindings]]
+name = "AUTH_LIMITER"
+type = "ratelimit"
+namespace_id = "1001"
+simple = { limit = 30, period = 60 }

@@ -10,6 +10,7 @@ const files = [
   "auth",
   "styles.css",
   "app.js",
+  "sw.js",
   "lib",
   "_headers",
   "wrangler.toml",

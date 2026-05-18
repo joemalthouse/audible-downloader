@@ -30,6 +30,14 @@ export default [
   { ignores: ["dist/**", "build/**", "node_modules/**", "vendor/**", ".wrangler/**", "scripts/debug-*.mjs"] },
   { files: ["app.js"], ...browserModule },
   { files: ["auth/callback/finish.js"], ...browserModule },
+  {
+    files: ["sw.js"],
+    languageOptions: {
+      globals: { ...globals.serviceworker, fetch: "readonly", URL: "readonly", Response: "readonly", caches: "readonly" },
+      ecmaVersion: "latest",
+      sourceType: "script",
+    },
+  },
   { files: ["lib/**/*.js"], ...workerModule },
   { files: ["functions/**/*.js"], ...workerModule },
   { files: ["helper-server.mjs", "scripts/**/*.mjs"], ...nodeModule },

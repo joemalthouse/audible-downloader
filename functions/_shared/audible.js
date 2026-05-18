@@ -182,19 +182,36 @@ export async function getDownloadLicense(auth, asin) {
 
 export function normaliseLibrary(payload) {
   const items = payload.items || payload.books || [];
-  const books = items.map((book) => ({
-    asin: book.asin || book.AudibleProductId || book.product_id || "",
-    title: book.title || book.Title || "",
-    subtitle: book.subtitle || book.Subtitle || "",
-    authors: Array.isArray(book.authors) ? book.authors.map((a) => a.name || a).join(", ") : book.AuthorNames || "",
-    narrators: Array.isArray(book.narrators) ? book.narrators.map((n) => n.name || n).join(", ") : book.NarratorNames || "",
-    lengthInMinutes: Math.round((book.runtime_length_min || book.LengthInMinutes || 0)),
-    locale: book.locale || "",
-    status: book.status || "",
-    imageUrl: getBookImageUrl(book),
-  })).filter((book) => book.asin && book.title);
+  const books = items.map((book) => {
+    const series = Array.isArray(book.series) ? book.series.map((s) => ({
+      asin: s.asin || "",
+      title: s.title || "",
+      sequence: s.sequence || "",
+    })).filter((s) => s.title) : [];
+    return {
+      asin: book.asin || book.AudibleProductId || book.product_id || "",
+      title: book.title || book.Title || "",
+      subtitle: book.subtitle || book.Subtitle || "",
+      authors: Array.isArray(book.authors) ? book.authors.map((a) => a.name || a).join(", ") : book.AuthorNames || "",
+      narrators: Array.isArray(book.narrators) ? book.narrators.map((n) => n.name || n).join(", ") : book.NarratorNames || "",
+      lengthInMinutes: Math.round((book.runtime_length_min || book.LengthInMinutes || 0)),
+      locale: book.locale || "",
+      status: book.status || "",
+      imageUrl: getBookImageUrl(book),
+      synopsis: stripHtml(book.publisher_summary || book.PublisherSummary || book.merchandising_summary || ""),
+      releaseDate: book.release_date || book.issue_date || book.publication_datetime || "",
+      language: book.language || "",
+      publisher: book.publisher_name || book.PublisherName || "",
+      series,
+      purchaseDate: book.purchase_date || "",
+    };
+  }).filter((book) => book.asin && book.title);
 
   return { source: "audible api", exportedAt: new Date().toISOString(), count: books.length, books };
+}
+
+function stripHtml(value) {
+  return String(value || "").replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim();
 }
 
 function getBookImageUrl(book) {

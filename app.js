@@ -8,6 +8,11 @@ import {
 
 const libraryEl = document.querySelector("#library");
 const librarySummary = document.querySelector("#librarySummary");
+const librarySearchInput = document.querySelector("#librarySearch");
+const librarySortSelect = document.querySelector("#librarySort");
+const exportCsvButton = document.querySelector("#exportLibraryCsv");
+const exportJsonButton = document.querySelector("#exportLibraryJson");
+const bookCardTemplate = document.querySelector("#bookCardTemplate");
 const connectSummary = document.querySelector("#connectSummary");
 const capabilityStatus = document.querySelector("#capabilityStatus");
 const refreshLibraryButton = document.querySelector("#refreshLibraryButton");
@@ -53,6 +58,16 @@ const wasmLogLines = [];
 let wasmLogFlushScheduled = false;
 const runtimeLogLines = [];
 let runtimeLogFlushScheduled = false;
+let librarySearch = "";
+let librarySort = "recent";
+const expandedAsins = new Set();
+const downloadQueue = [];
+let conversionRunning = false;
+let wakeLockSentinel = null;
+let beforeUnloadHandlerInstalled = false;
+const trustedTypesPolicy = (typeof window !== "undefined" && window.trustedTypes?.createPolicy)
+  ? window.trustedTypes.createPolicy("audible-app", { createHTML: (input) => input })
+  : null;
 let audibleIdentity = loadAudibleIdentity();
 
 setCapabilityStatus();
@@ -71,6 +86,40 @@ loginResponseInput.addEventListener("paste", handleResponseInputPaste);
 loginResponseInput.addEventListener("input", handleResponseInputChange);
 document.addEventListener("visibilitychange", handleVisibilityChange);
 window.addEventListener("storage", handleIdentityStorageEvent);
+librarySearchInput?.addEventListener("input", handleSearchInput);
+librarySortSelect?.addEventListener("change", handleSortChange);
+exportCsvButton?.addEventListener("click", () => exportLibrary("csv"));
+exportJsonButton?.addEventListener("click", () => exportLibrary("json"));
+libraryEl.addEventListener("click", handleLibraryClick);
+
+if ("serviceWorker" in navigator && location.protocol === "https:") {
+  navigator.serviceWorker.register("/sw.js", { scope: "/" }).catch((err) => log(`SW registration failed: ${err.message}`, "warn"));
+}
+
+function handleSearchInput(event) {
+  librarySearch = String(event.target.value || "").toLowerCase().trim();
+  scheduleRender();
+}
+
+function handleSortChange(event) {
+  librarySort = String(event.target.value || "recent");
+  scheduleRender();
+}
+
+function handleLibraryClick(event) {
+  const card = event.target.closest(".book");
+  if (!card) return;
+  const asin = card.dataset.asin;
+  if (!asin) return;
+  if (event.target.closest(".download-primary")) {
+    enqueueDownload(asin);
+    return;
+  }
+  if (event.target.closest(".book-detail-toggle")) {
+    if (expandedAsins.has(asin)) expandedAsins.delete(asin); else expandedAsins.add(asin);
+    scheduleRender();
+  }
+}
 
 function handleIdentityStorageEvent(event) {
   if (event.key !== "audible-downloader-identity") return;
@@ -103,51 +152,185 @@ function setCapabilityStatus() {
 
 function renderLibrary() {
   const total = library.length;
+  const visible = getVisibleLibrary();
   librarySummary.textContent = total
-    ? `${total} title${total === 1 ? "" : "s"}`
+    ? visible.length === total
+      ? `${total} title${total === 1 ? "" : "s"}`
+      : `${visible.length} of ${total}`
     : audibleIdentity ? "Loading" : "Sign in required";
-  libraryEl.innerHTML = "";
+
+  setSafeHtml(libraryEl, "");
 
   if (!total) {
-    libraryEl.innerHTML = `<div class="empty">${audibleIdentity ? "Loading your Audible library..." : "Sign in to show your Audible books."}</div>`;
+    setSafeHtml(libraryEl, `<div class="empty">${audibleIdentity ? "Loading your Audible library..." : "Sign in to show your Audible books."}</div>`);
+    return;
+  }
+  if (!visible.length) {
+    setSafeHtml(libraryEl, `<div class="empty">No titles match "${escapeHtml(librarySearch)}".</div>`);
     return;
   }
 
-  for (const book of library) {
-    const job = jobs.get(book.asin);
-    const progress = Number.isFinite(job?.progress) ? Math.max(0, Math.min(100, job.progress)) : 0;
-    const isBusy = job?.running || wasmBusy;
-    const row = document.createElement("article");
-    row.className = "book";
-    row.innerHTML = `
-      <div class="book-main">
-        <div class="cover">
-          ${book.imageUrl ? `<img src="${escapeHtml(book.imageUrl)}" alt="" loading="lazy" />` : `<span>${escapeHtml(bookInitials(book))}</span>`}
-        </div>
-        <div class="book-copy">
-          <h3>${escapeHtml(book.title)}${book.subtitle ? `: ${escapeHtml(book.subtitle)}` : ""}</h3>
-          <div class="meta">${escapeHtml(book.authors || "Unknown author")} - ${formatMinutes(book.lengthInMinutes)}</div>
-          <div class="book-progress ${job ? "" : "idle"}">
-            <div class="progress"><div class="bar" style="width: ${progress}%"></div></div>
-            <div class="job-line">${job ? `${escapeHtml(job.status)}${job.lastLine ? ` - ${escapeHtml(job.lastLine)}` : ""}` : "Ready"}</div>
-          </div>
-        </div>
-      </div>
-      <div class="book-actions">
-        <button type="button" class="download-primary" data-asin="${escapeHtml(book.asin)}" ${isBusy ? "disabled" : ""}>Download</button>
-      </div>
-    `;
-    libraryEl.append(row);
+  for (const book of visible) {
+    libraryEl.append(buildBookCard(book));
+  }
+}
+
+/**
+ * @param {object} book
+ * @returns {HTMLElement}
+ */
+function buildBookCard(book) {
+  const fragment = bookCardTemplate.content.cloneNode(true);
+  const card = fragment.querySelector(".book");
+  card.dataset.asin = book.asin;
+
+  const job = jobs.get(book.asin);
+  const queued = downloadQueue.includes(book.asin) && !job?.running;
+  const progress = Number.isFinite(job?.progress) ? Math.max(0, Math.min(100, job.progress)) : 0;
+  const isBusy = Boolean(job?.running) || queued;
+
+  const coverImage = card.querySelector(".cover-image");
+  const coverInitials = card.querySelector(".cover-initials");
+  if (book.imageUrl) {
+    coverImage.src = book.imageUrl;
+    coverImage.hidden = false;
+    coverInitials.hidden = true;
+  } else {
+    coverImage.hidden = true;
+    coverInitials.hidden = false;
+    coverInitials.textContent = bookInitials(book);
   }
 
-  libraryEl.querySelectorAll(".download-primary").forEach((button) => {
-    button.addEventListener("click", () => startBrowserM4bConversion(button.dataset.asin));
-  });
+  card.querySelector(".book-title").textContent = book.subtitle
+    ? `${book.title}: ${book.subtitle}`
+    : book.title;
+  card.querySelector(".book-meta").textContent =
+    `${book.authors || "Unknown author"} · ${formatMinutes(book.lengthInMinutes)}`;
+
+  const seriesMeta = card.querySelector(".book-series-meta");
+  const primarySeries = book.series?.[0];
+  if (primarySeries?.title) {
+    seriesMeta.textContent = primarySeries.sequence
+      ? `${primarySeries.title} · book ${primarySeries.sequence}`
+      : primarySeries.title;
+    seriesMeta.hidden = false;
+  }
+
+  const progressEl = card.querySelector(".book-progress");
+  progressEl.classList.toggle("idle", !job);
+  card.querySelector(".bar").style.width = `${progress}%`;
+  const jobLine = card.querySelector(".job-line");
+  if (queued && !job) {
+    jobLine.textContent = "Queued";
+  } else if (job) {
+    jobLine.textContent = job.lastLine
+      ? `${job.status} — ${job.lastLine}`
+      : job.status;
+  } else {
+    jobLine.textContent = "Ready";
+  }
+
+  const errorEl = card.querySelector(".book-error");
+  if (job?.error) {
+    errorEl.textContent = job.error;
+    errorEl.hidden = false;
+  }
+
+  const downloadButton = card.querySelector(".download-primary");
+  downloadButton.disabled = isBusy;
+  downloadButton.textContent = queued ? "Queued" : (job?.running ? "Working…" : "Download");
+
+  const detailToggle = card.querySelector(".book-detail-toggle");
+  const detailPanel = card.querySelector(".book-detail");
+  const expanded = expandedAsins.has(book.asin);
+  detailToggle.setAttribute("aria-expanded", String(expanded));
+  detailPanel.hidden = !expanded;
+  if (expanded) populateBookDetail(card, book);
+
+  return card;
+}
+
+/**
+ * @param {HTMLElement} card
+ * @param {object} book
+ */
+function populateBookDetail(card, book) {
+  card.querySelector(".book-synopsis").textContent = book.synopsis || "No synopsis available.";
+  card.querySelector(".book-narrator").textContent = book.narrators || "—";
+  card.querySelector(".book-length").textContent = formatMinutes(book.lengthInMinutes);
+  card.querySelector(".book-series").textContent = book.series?.length
+    ? book.series.map((s) => s.sequence ? `${s.title} (#${s.sequence})` : s.title).join("; ")
+    : "—";
+  card.querySelector(".book-release").textContent = formatDate(book.releaseDate);
+  card.querySelector(".book-language").textContent = book.language || "—";
+  card.querySelector(".book-publisher").textContent = book.publisher || "—";
+}
+
+function getVisibleLibrary() {
+  let result = library;
+  if (librarySearch) {
+    result = result.filter((book) => {
+      const hay = `${book.title} ${book.subtitle || ""} ${book.authors} ${book.narrators}`.toLowerCase();
+      return hay.includes(librarySearch);
+    });
+  }
+  const sorted = result.slice();
+  sorted.sort(compareBooks);
+  return sorted;
+}
+
+/**
+ * @param {object} a
+ * @param {object} b
+ */
+function compareBooks(a, b) {
+  switch (librarySort) {
+    case "title": return collator.compare(a.title, b.title);
+    case "author": return collator.compare(a.authors || "", b.authors || "");
+    case "length-asc": return (a.lengthInMinutes || 0) - (b.lengthInMinutes || 0);
+    case "length-desc": return (b.lengthInMinutes || 0) - (a.lengthInMinutes || 0);
+    case "series": {
+      const sa = a.series?.[0];
+      const sb = b.series?.[0];
+      const seriesCmp = collator.compare(sa?.title || "~", sb?.title || "~");
+      if (seriesCmp !== 0) return seriesCmp;
+      return (Number(sa?.sequence) || 0) - (Number(sb?.sequence) || 0);
+    }
+    case "recent":
+    default:
+      return collator.compare(b.purchaseDate || b.releaseDate || "", a.purchaseDate || a.releaseDate || "");
+  }
+}
+
+const collator = new Intl.Collator(undefined, { sensitivity: "base", numeric: true });
+
+/**
+ * @param {Element} el
+ * @param {string} html
+ */
+function setSafeHtml(el, html) {
+  el.innerHTML = trustedTypesPolicy ? trustedTypesPolicy.createHTML(html) : html;
+}
+
+function formatDate(value) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString();
 }
 
 async function loadLibrary(refresh) {
   refreshLibraryButton.disabled = true;
-  setTransientSummary("Loading library");
+  setTransientSummary(refresh ? "Refreshing library" : "Loading library");
+
+  if (!refresh && audibleIdentity?.amazonAccountId) {
+    const cached = await loadCachedLibrary(audibleIdentity.amazonAccountId).catch(() => null);
+    if (cached?.books?.length) {
+      library = cached.books;
+      renderLibrary();
+      setTransientSummary("Updating from Audible");
+    }
+  }
 
   try {
     if (!audibleIdentity) throw new Error("No authenticated Audible account");
@@ -158,7 +341,7 @@ async function loadLibrary(refresh) {
       const path = buildLibraryPath(page);
       const headers = await buildSignedAuthHeader("GET", path);
       const url = `/library?page=${page}${refresh && page === 1 ? "&refresh=1" : ""}`;
-      const response = await fetch(url, { cache: "no-store", headers });
+      const response = await fetchWithRetry(url, { cache: "no-store", headers }, { timeoutMs: 25000 });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(describeUpstreamError(payload, response.status));
       books.push(...(payload.books || []));
@@ -168,8 +351,15 @@ async function loadLibrary(refresh) {
       if (page === maxPages) console.warn("library pagination hit cap", { total, fetched: books.length });
     }
     library = books;
+    if (audibleIdentity?.amazonAccountId) {
+      saveCachedLibrary(audibleIdentity.amazonAccountId, books).catch(() => {});
+    }
     clearTransientSummary();
     log(`Loaded ${library.length} library titles.`);
+    preloadFfmpegCore();
+    if (librarySearchInput && document.activeElement === document.body) {
+      librarySearchInput.focus({ preventScroll: true });
+    }
   } catch (error) {
     setTransientSummary(`Library load failed: ${error.message}`);
     log(`Library load failed: ${error.message}`, "error");
@@ -178,6 +368,176 @@ async function loadLibrary(refresh) {
     renderLoginPanels();
     renderLibrary();
   }
+}
+
+const LIBRARY_DB = "audible-downloader";
+const LIBRARY_STORE = "library-cache";
+
+function openLibraryDb() {
+  return new Promise((resolve, reject) => {
+    if (!("indexedDB" in window)) { reject(new Error("IndexedDB unsupported")); return; }
+    const req = indexedDB.open(LIBRARY_DB, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(LIBRARY_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+
+async function loadCachedLibrary(accountId) {
+  if (!accountId) return null;
+  const db = await openLibraryDb().catch(() => null);
+  if (!db) return null;
+  try {
+    return await new Promise((resolve) => {
+      const tx = db.transaction(LIBRARY_STORE, "readonly");
+      const req = tx.objectStore(LIBRARY_STORE).get(accountId);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => resolve(null);
+    });
+  } finally { db.close(); }
+}
+
+async function saveCachedLibrary(accountId, books) {
+  if (!accountId) return;
+  const db = await openLibraryDb().catch(() => null);
+  if (!db) return;
+  try {
+    await new Promise((resolve) => {
+      const tx = db.transaction(LIBRARY_STORE, "readwrite");
+      tx.objectStore(LIBRARY_STORE).put({ books, savedAt: Date.now() }, accountId);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    });
+  } finally { db.close(); }
+}
+
+async function clearCachedLibrary() {
+  const db = await openLibraryDb().catch(() => null);
+  if (!db) return;
+  try {
+    await new Promise((resolve) => {
+      const tx = db.transaction(LIBRARY_STORE, "readwrite");
+      tx.objectStore(LIBRARY_STORE).clear();
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    });
+  } finally { db.close(); }
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * fetch with exponential-backoff retry on 5xx + network failure, and an abort
+ * timer for each attempt.
+ * @param {string} url
+ * @param {RequestInit} [options]
+ * @param {{ tries?: number, timeoutMs?: number }} [config]
+ * @returns {Promise<Response>}
+ */
+async function fetchWithRetry(url, options = {}, config = {}) {
+  const tries = config.tries ?? 3;
+  const timeoutMs = config.timeoutMs ?? 30000;
+  let lastError;
+  for (let attempt = 0; attempt < tries; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, { ...options, signal: controller.signal });
+      clearTimeout(timer);
+      if (response.status >= 500 && response.status < 600 && attempt < tries - 1) {
+        await sleep(2 ** attempt * 500 + Math.random() * 250);
+        continue;
+      }
+      return response;
+    } catch (error) {
+      clearTimeout(timer);
+      lastError = error;
+      if (attempt < tries - 1) {
+        await sleep(2 ** attempt * 500 + Math.random() * 250);
+        continue;
+      }
+      throw error;
+    }
+  }
+  throw lastError;
+}
+
+function preloadFfmpegCore() {
+  if (wasmFfmpeg?.loaded) return;
+  loadWasmCore().catch((error) => log(`ffmpeg preload deferred: ${error.message}`, "warn"));
+}
+
+function enqueueDownload(asin) {
+  if (!asin) return;
+  if (downloadQueue.includes(asin)) return;
+  const job = jobs.get(asin);
+  if (job?.running) return;
+  jobs.set(asin, { running: false, status: "Queued", lastLine: "", progress: 0, error: null });
+  downloadQueue.push(asin);
+  scheduleRender();
+  void processDownloadQueue();
+}
+
+async function processDownloadQueue() {
+  if (conversionRunning) return;
+  while (downloadQueue.length > 0) {
+    const next = downloadQueue.shift();
+    if (!next) continue;
+    conversionRunning = true;
+    try {
+      await startBrowserM4bConversion(next);
+    } catch (error) {
+      log(`Queue conversion failed for ${next}: ${error.message}`, "error");
+    } finally {
+      conversionRunning = false;
+    }
+  }
+}
+
+async function acquireWakeLock() {
+  if (wakeLockSentinel || !navigator.wakeLock?.request) return;
+  try {
+    wakeLockSentinel = await navigator.wakeLock.request("screen");
+    wakeLockSentinel.addEventListener("release", () => { wakeLockSentinel = null; });
+  } catch (error) {
+    log(`Wake Lock denied: ${error.message}`, "warn");
+  }
+}
+
+function releaseWakeLock() {
+  if (!wakeLockSentinel) return;
+  wakeLockSentinel.release().catch(() => {});
+  wakeLockSentinel = null;
+}
+
+function installBeforeUnloadGuard() {
+  if (beforeUnloadHandlerInstalled) return;
+  window.addEventListener("beforeunload", beforeUnloadHandler);
+  beforeUnloadHandlerInstalled = true;
+}
+
+function removeBeforeUnloadGuard() {
+  if (!beforeUnloadHandlerInstalled) return;
+  window.removeEventListener("beforeunload", beforeUnloadHandler);
+  beforeUnloadHandlerInstalled = false;
+}
+
+function beforeUnloadHandler(event) {
+  if (!wasmBusy && downloadQueue.length === 0) return;
+  event.preventDefault();
+  event.returnValue = "";
+}
+
+function setBookError(asin, message) {
+  const job = jobs.get(asin) || {};
+  jobs.set(asin, { ...job, error: message });
+  scheduleRender();
+}
+
+function clearBookError(asin) {
+  const job = jobs.get(asin);
+  if (!job?.error) return;
+  jobs.set(asin, { ...job, error: null });
 }
 
 function renderLoginPanels() {
@@ -445,7 +805,12 @@ function signOutAudible() {
   library = [];
   jobs.clear();
   inspections.clear();
+  downloadQueue.length = 0;
+  expandedAsins.clear();
+  librarySearch = "";
+  if (librarySearchInput) librarySearchInput.value = "";
   clearTransientSummary();
+  void clearCachedLibrary();
   renderLoginPanels();
   renderLibrary();
   log("Signed out of Audible.");
@@ -479,6 +844,9 @@ async function startBrowserM4bConversion(asin) {
 
   let mounted = false;
   wasmBusy = true;
+  clearBookError(asin);
+  installBeforeUnloadGuard();
+  void acquireWakeLock();
   setWasmProgress(0);
   setJob(asin, "Preparing", "Loading converter", 1);
   appendWasmLog(`Starting browser M4B flow for ${book.title}.`);
@@ -505,7 +873,7 @@ async function startBrowserM4bConversion(asin) {
     appendWasmLog(`Streaming encrypted source for ${book.title} (${formatBytes(inspection.size || 0)}).`);
     setJob(asin, "Downloading", "0%", 5);
     renderLibrary();
-    const sourceFile = await downloadSourceToOpfs(inspection.proxyUrl, inputName, (received, total) => {
+    const sourceFile = await downloadSourceToOpfs(inspection.proxyUrl, inputName, inspection.size || 0, (received, total) => {
       const pct = total ? Math.min(45, 5 + (received / total) * 40) : 8;
       const status = total ? `Fetching ${Math.round((received / total) * 100)}%` : `Fetching ${formatBytes(received)}`;
       wasmStatus.textContent = status;
@@ -566,6 +934,7 @@ async function startBrowserM4bConversion(asin) {
     const detail = formatError(error);
     appendWasmLog(`Convert failed: ${detail}`);
     setJob(asin, "Failed", detail, 0, false);
+    setBookError(asin, detail);
     log(`Browser M4B conversion failed for ${asin}: ${detail}`, "error");
   } finally {
     if (mounted) await wasmFfmpeg?.unmount?.(mountPoint).catch(() => {});
@@ -573,12 +942,17 @@ async function startBrowserM4bConversion(asin) {
     await deleteOpfsFile(inputName);
     if (activeConversionAsin === asin) activeConversionAsin = "";
     wasmBusy = false;
+    if (downloadQueue.length === 0) {
+      releaseWakeLock();
+      removeBeforeUnloadGuard();
+    }
     renderLibrary();
   }
 }
 
 function setJob(asin, status, lastLine, progress, running = true) {
-  jobs.set(asin, { running, status, lastLine, progress });
+  const existing = jobs.get(asin) || {};
+  jobs.set(asin, { running, status, lastLine, progress, error: running ? null : existing.error || null });
 }
 
 function scheduleRender() {
@@ -594,7 +968,7 @@ async function fetchLicense(asin) {
   const licensePath = buildLicensePath(asin);
   const licenseBody = JSON.stringify(buildLicenseRequestBody());
   const headers = await buildSignedAuthHeader("POST", licensePath, licenseBody);
-  const response = await fetch(`/license/${encodeURIComponent(asin)}`, { cache: "no-store", headers });
+  const response = await fetchWithRetry(`/license/${encodeURIComponent(asin)}`, { cache: "no-store", headers }, { timeoutMs: 25000 });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(describeUpstreamError(payload, response.status));
   return payload;
@@ -705,18 +1079,28 @@ function getAaxcKey(license) {
   return { audibleKey, audibleIv };
 }
 
-async function downloadSourceToOpfs(proxyUrl, name, onProgress) {
+async function downloadSourceToOpfs(proxyUrl, name, expectedSize, onProgress) {
   if (!navigator.storage?.getDirectory) {
     throw new Error("Browser lacks OPFS support. Use a current Chromium build.");
   }
   const dir = await navigator.storage.getDirectory();
-  await dir.removeEntry(name).catch(() => {});
+
+  const existing = await dir.getFileHandle(name, { create: false }).catch(() => null);
+  if (existing) {
+    const cached = await existing.getFile();
+    if (expectedSize > 0 && cached.size === expectedSize) {
+      onProgress?.(cached.size, expectedSize);
+      return cached;
+    }
+    await dir.removeEntry(name).catch(() => {});
+  }
+
   const handle = await dir.getFileHandle(name, { create: true });
   const writable = await handle.createWritable();
   try {
-    const response = await fetch(proxyUrl, { cache: "no-store" });
+    const response = await fetchWithRetry(proxyUrl, { cache: "no-store" }, { timeoutMs: 180000 });
     if (!response.ok) throw new Error(`source fetch HTTP ${response.status}`);
-    const total = Number(response.headers.get("content-length")) || 0;
+    const total = Number(response.headers.get("content-length")) || expectedSize || 0;
     const reader = response.body.getReader();
     let received = 0;
     for (;;) {
@@ -908,4 +1292,28 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+/**
+ * Export current library list as CSV or JSON.
+ * @param {"csv" | "json"} format
+ */
+function exportLibrary(format) {
+  if (!library.length) return;
+  const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-");
+  const filename = `audible-library-${stamp}.${format}`;
+  let blob;
+  if (format === "json") {
+    blob = new Blob([JSON.stringify({ exportedAt: new Date().toISOString(), books: library }, null, 2)], { type: "application/json" });
+  } else {
+    const headers = ["asin", "title", "subtitle", "authors", "narrators", "lengthInMinutes", "language", "publisher", "releaseDate", "series"];
+    const rows = library.map((book) => headers.map((key) => {
+      const value = key === "series"
+        ? (book.series || []).map((s) => s.sequence ? `${s.title} #${s.sequence}` : s.title).join(" | ")
+        : book[key] ?? "";
+      return `"${String(value).replace(/"/g, '""')}"`;
+    }).join(","));
+    blob = new Blob([[headers.join(","), ...rows].join("\n")], { type: "text/csv" });
+  }
+  saveBlobViaAnchor(blob, filename);
 }

@@ -98,7 +98,7 @@
             <span class="section-eyebrow">Step one</span>
             <h2>Connect Audible</h2>
           </div>
-          <span class="status-tag" id="connectSummary">Not signed in</span>
+          <span class="status-tag" id="connectSummary" aria-live="polite">Not signed in</span>
         </div>
 
         <div id="loginStartPanel" class="login-state is-active">
@@ -197,9 +197,71 @@
             <span class="section-eyebrow">Step two</span>
             <h2>Your library</h2>
           </div>
-          <span class="status-tag" id="librarySummary">Not loaded</span>
+          <span class="status-tag" id="librarySummary" aria-live="polite">Not loaded</span>
         </div>
-        <div id="library" class="library"></div>
+
+        <div class="library-controls">
+          <label class="field library-search">
+            <span class="visually-hidden">Search library</span>
+            <input id="librarySearch" type="search" placeholder="Search title, author, or narrator" autocomplete="off" aria-label="Search library" />
+          </label>
+          <label class="field library-sort">
+            <span class="field-label">Sort</span>
+            <select id="librarySort" aria-label="Sort library">
+              <option value="recent" selected>Recently added</option>
+              <option value="title">Title (A–Z)</option>
+              <option value="author">Author (A–Z)</option>
+              <option value="length-asc">Length (shortest)</option>
+              <option value="length-desc">Length (longest)</option>
+              <option value="series">Series</option>
+            </select>
+          </label>
+          <details class="library-export">
+            <summary class="btn-ghost">Export</summary>
+            <div class="library-export-menu" role="menu">
+              <button type="button" id="exportLibraryCsv" role="menuitem">Download CSV</button>
+              <button type="button" id="exportLibraryJson" role="menuitem">Download JSON</button>
+            </div>
+          </details>
+        </div>
+
+        <div id="library" class="library" aria-live="polite"></div>
+
+        <template id="bookCardTemplate">
+          <article class="book">
+            <div class="book-main">
+              <div class="cover">
+                <img class="cover-image" alt="" loading="lazy" hidden />
+                <span class="cover-initials" hidden></span>
+              </div>
+              <div class="book-copy">
+                <h3 class="book-title"></h3>
+                <div class="meta book-meta"></div>
+                <div class="book-series-meta" hidden></div>
+                <div class="book-progress idle">
+                  <div class="progress" aria-hidden="true"><div class="bar"></div></div>
+                  <div class="job-line" aria-live="polite">Ready</div>
+                </div>
+                <div class="book-error" hidden role="alert"></div>
+              </div>
+            </div>
+            <div class="book-actions">
+              <button type="button" class="btn-ghost book-detail-toggle" aria-expanded="false">Details</button>
+              <button type="button" class="download-primary">Download</button>
+            </div>
+            <div class="book-detail" hidden>
+              <p class="book-synopsis"></p>
+              <dl class="book-detail-grid">
+                <div class="dt-dd"><dt>Narrator</dt><dd class="book-narrator">—</dd></div>
+                <div class="dt-dd"><dt>Length</dt><dd class="book-length">—</dd></div>
+                <div class="dt-dd"><dt>Series</dt><dd class="book-series">—</dd></div>
+                <div class="dt-dd"><dt>Released</dt><dd class="book-release">—</dd></div>
+                <div class="dt-dd"><dt>Language</dt><dd class="book-language">—</dd></div>
+                <div class="dt-dd"><dt>Publisher</dt><dd class="book-publisher">—</dd></div>
+              </dl>
+            </div>
+          </article>
+        </template>
       </section>
 
       <section class="panel download-progress-panel" hidden>
@@ -208,7 +270,7 @@
             <span class="section-eyebrow">In progress</span>
             <h2>Conversion</h2>
           </div>
-          <span class="status-tag" id="wasmStatus">Not started</span>
+          <span class="status-tag" id="wasmStatus" aria-live="polite">Not started</span>
         </div>
         <div class="progress wasm-progress" aria-hidden="true"><div id="wasmProgressBar" class="bar"></div></div>
         <pre id="wasmLog" class="log compact">No WASM run yet.</pre>
